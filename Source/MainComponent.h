@@ -1,6 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "SessionWriter.h"
 
 class MainComponent : public juce::Component
 {
@@ -14,6 +15,13 @@ public:
 private:
     void populateRoutingCombos();
     void checkRoutingSafety (juce::ComboBox* changed);
+    void onInitProjectClicked();
+    void onMeasureButtonClicked();
+
+    // --- Project setup ---
+    juce::Label      projectLabel  { {}, "Project Name:" };
+    juce::TextEditor projectNameEditor;
+    juce::TextButton initProjectButton { "Initialize Project" };
 
     // --- Mode selector ---
     juce::Label modeLabel;
@@ -29,12 +37,18 @@ private:
     juce::ComboBox returnCombo;
     juce::ComboBox monitorCombo;
 
+    // --- Measurement control ---
+    juce::TextButton measureButton { "Start Measurement" };
+
     // --- Plan editor shell ---
     juce::Label planLabel;
     juce::ListBox planList;
 
     // --- Status bar ---
     juce::Label statusLabel;
+
+    // --- Session writer (owns project folder + file paths) ---
+    SessionWriter sessionWriter;
 
     // --- Audio engine (owns AudioDeviceManager) ---
     AudioEngine audioEngine;
