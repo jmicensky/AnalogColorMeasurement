@@ -13,6 +13,7 @@ public:
 
 private:
     void populateRoutingCombos();
+    void checkRoutingSafety (juce::ComboBox* changed);
 
     // --- Mode selector ---
     juce::Label modeLabel;

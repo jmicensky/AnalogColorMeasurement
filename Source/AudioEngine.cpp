@@ -16,6 +16,23 @@ AudioEngine::AudioEngine()
 
     if (result.isNotEmpty())
         DBG ("AudioDeviceManager initialise error: " + result);
+
+    // On macOS, initialise() may pick separate devices for input and output
+    // (e.g. system default output = audio interface, default input = built-in
+    // microphone). For measurement we need both I/O on the same hardware
+    // device. If they differ, force the input device to match the output.
+    auto setup = deviceManager.getAudioDeviceSetup();
+
+    if (setup.outputDeviceName.isNotEmpty() &&
+        setup.inputDeviceName != setup.outputDeviceName)
+    {
+        setup.inputDeviceName         = setup.outputDeviceName;
+        setup.useDefaultInputChannels = true;
+        auto err = deviceManager.setAudioDeviceSetup (setup, true);
+
+        if (err.isNotEmpty())
+            DBG ("AudioDeviceManager input alignment error: " + err);
+    }
 }
 
 AudioEngine::~AudioEngine()

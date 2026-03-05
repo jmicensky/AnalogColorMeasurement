@@ -29,6 +29,12 @@ MainComponent::MainComponent()
 
     populateRoutingCombos();
 
+    // Attach safety callbacks. Each lambda captures `this` and passes a pointer
+    // to the combo that just changed, so checkRoutingSafety() knows which one
+    // to revert if a conflict is detected.
+    sendCombo   .onChange = [this] { checkRoutingSafety (&sendCombo); };
+    monitorCombo.onChange = [this] { checkRoutingSafety (&monitorCombo); };
+
     // --- Plan editor shell ---
     planLabel.setText ("Stimulus Plan", juce::dontSendNotification);
     planLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
@@ -96,6 +102,30 @@ void MainComponent::populateRoutingCombos()
     sendCombo   .setSelectedId (1);
     returnCombo .setSelectedId (1);
     monitorCombo.setSelectedId (1);
+}
+
+void MainComponent::checkRoutingSafety (juce::ComboBox* changed)
+{
+    const int sendId    = sendCombo   .getSelectedId();
+    const int monitorId = monitorCombo.getSelectedId();
+
+    // ID 1 means "(not set)" — only flag a conflict when both sides have a
+    // real hardware pair selected and they resolve to the same output channels.
+    // {Send outputs} ∩ {Monitor outputs} must equal ∅  (proposal eq. 2).
+    if (sendId != 1 && monitorId != 1 && sendId == monitorId)
+    {
+        // Revert whichever combo the user just touched back to "(not set)".
+        // dontSendNotification prevents this revert from re-triggering onChange.
+        changed->setSelectedId (1, juce::dontSendNotification);
+        statusLabel.setText ("WARNING: Send and Monitor cannot share the same output pair.",
+                             juce::dontSendNotification);
+        return;
+    }
+
+    // Routing is safe — restore the normal device name in the status bar.
+    auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
+    juce::String deviceName = device ? device->getName() : "No audio device";
+    statusLabel.setText ("Device: " + deviceName, juce::dontSendNotification);
 }
 
 void MainComponent::paint (juce::Graphics& g)
