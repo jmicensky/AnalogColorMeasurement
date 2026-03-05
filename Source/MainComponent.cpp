@@ -1,7 +1,20 @@
 #include "MainComponent.h"
+#include <BinaryData.h>
 
 MainComponent::MainComponent()
 {
+    // --- Reference file selector ---
+    refFileLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
+    addAndMakeVisible (refFileLabel);
+
+    refFileCombo.addItem ("(select file)", 1);
+    refFileCombo.addItem ("DRUMS",         2);
+    refFileCombo.addItem ("BASSDI",        3);
+    refFileCombo.addItem ("ElecKeys",      4);
+    refFileCombo.setSelectedId (1);
+    refFileCombo.onChange = [this] { onRefFileSelected(); };
+    addAndMakeVisible (refFileCombo);
+
     // --- Project setup ---
     projectLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (projectLabel);
@@ -27,6 +40,9 @@ MainComponent::MainComponent()
     addAndMakeVisible (compressorModeButton);
 
     // --- Routing selector ---
+    audioSettingsButton.onClick = [this] { onAudioSettingsClicked(); };
+    addAndMakeVisible (audioSettingsButton);
+
     routingLabel.setText ("Audio Routing", juce::dontSendNotification);
     routingLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (routingLabel);
@@ -91,10 +107,88 @@ void MainComponent::onInitProjectClicked()
                          juce::dontSendNotification);
 }
 
+void MainComponent::onAudioSettingsClicked()
+{
+    auto* selector = new juce::AudioDeviceSelectorComponent (
+        audioEngine.getDeviceManager(),
+        0, 32,    // input channels
+        0, 32,    // output channels
+        false, false, true, false);
+
+    selector->setSize (500, 450);
+
+    juce::DialogWindow::LaunchOptions opts;
+    opts.content.setOwned (selector);
+    opts.dialogTitle                = "Audio Device Settings";
+    opts.dialogBackgroundColour     = getLookAndFeel().findColour (
+                                          juce::ResizableWindow::backgroundColourId);
+    opts.escapeKeyTriggersCloseButton = true;
+    opts.useNativeTitleBar          = true;
+    opts.resizable                  = true;
+
+    auto* dialog = opts.launchAsync();
+
+    // Re-populate routing combos and refresh status when the dialog is dismissed,
+    // since the user may have changed the device or its channel layout.
+    juce::ModalComponentManager::getInstance()->attachCallback (
+        dialog,
+        juce::ModalCallbackFunction::create ([this] (int)
+        {
+            populateRoutingCombos();
+            auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
+            juce::String deviceName = device ? device->getName() : "No audio device";
+            statusLabel.setText ("Device: " + deviceName, juce::dontSendNotification);
+        }));
+}
+
+void MainComponent::onRefFileSelected()
+{
+    struct RefEntry { const void* data; size_t size; const char* stem; };
+
+    const RefEntry entries[] = {
+        { BinaryData::DRUMS_testtone_wav,    (size_t) BinaryData::DRUMS_testtone_wavSize,    "DRUMS"    },
+        { BinaryData::BASSDI_testtone_wav,   (size_t) BinaryData::BASSDI_testtone_wavSize,   "BASSDI"   },
+        { BinaryData::ElecKeys_testtone_wav, (size_t) BinaryData::ElecKeys_testtone_wavSize, "ElecKeys" },
+    };
+
+    const int id = refFileCombo.getSelectedId();
+    if (id < 2 || id > 4)
+        return;
+
+    const auto& e = entries[id - 2];
+    auto err = audioEngine.loadReferenceFileFromMemory (e.data, e.size, e.stem);
+
+    if (err.isNotEmpty())
+        statusLabel.setText ("ERROR loading ref file: " + err, juce::dontSendNotification);
+    else
+        statusLabel.setText ("Reference file loaded: " + juce::String (e.stem),
+                             juce::dontSendNotification);
+}
+
+void MainComponent::timerCallback()
+{
+    if (! audioEngine.isFinished())
+        return;
+
+    stopTimer();
+    measureButton.setToggleState (false, juce::dontSendNotification);
+    measureButton.setButtonText ("Start Measurement");
+
+    auto err = audioEngine.writeSession (sessionWriter.getRefFilePath(),
+                                         sessionWriter.getRecFilePath());
+    if (err.isNotEmpty())
+        statusLabel.setText ("ERROR writing session: " + err, juce::dontSendNotification);
+    else
+        statusLabel.setText ("Session saved to: "
+                             + sessionWriter.getProjectFolder().getFullPathName(),
+                             juce::dontSendNotification);
+}
+
 void MainComponent::onMeasureButtonClicked()
 {
     if (audioEngine.isMeasuring())
     {
+        stopTimer();
         audioEngine.stopMeasurement();
         measureButton.setButtonText ("Start Measurement");
         statusLabel.setText ("Measurement stopped.", juce::dontSendNotification);
@@ -133,9 +227,19 @@ void MainComponent::onMeasureButtonClicked()
                               ? -1
                               : (monitorCombo.getSelectedId() - 2) * 2;
 
+    // Gate 3: a reference file must be loaded.
+    if (audioEngine.getReferenceFileStem().isEmpty())
+    {
+        measureButton.setToggleState (false, juce::dontSendNotification);
+        statusLabel.setText ("ERROR: Select a Reference File before measuring.",
+                             juce::dontSendNotification);
+        return;
+    }
+
     audioEngine.setSendChannelPair    (sendCh);
     audioEngine.setMonitorChannelPair (monitorCh);
     audioEngine.startMeasurement();
+    startTimer (100);   // poll isFinished() every 100 ms
 
     measureButton.setButtonText ("Stop Measurement");
     statusLabel.setText ("Measuring...  Project: " + sessionWriter.getProjectName()
@@ -210,10 +314,11 @@ void MainComponent::paint (juce::Graphics& g)
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
 
     g.setColour (juce::Colours::grey);
-    // Dividers below: project section, mode section, routing section, status bar
-    g.drawHorizontalLine (44,              10.0f, (float) getWidth() - 10);
-    g.drawHorizontalLine (100,             10.0f, (float) getWidth() - 10);
-    g.drawHorizontalLine (230,             10.0f, (float) getWidth() - 10);
+    // Dividers below: ref-file section, project section, mode section, routing section, status bar
+    g.drawHorizontalLine (52,               10.0f, (float) getWidth() - 10);
+    g.drawHorizontalLine (96,               10.0f, (float) getWidth() - 10);
+    g.drawHorizontalLine (152,              10.0f, (float) getWidth() - 10);
+    g.drawHorizontalLine (282,              10.0f, (float) getWidth() - 10);
     g.drawHorizontalLine (getHeight() - 30, 10.0f, (float) getWidth() - 10);
 }
 
@@ -223,6 +328,11 @@ void MainComponent::resized()
     const int rowH    = 28;
     const int labelW  = 160;
     int y = margin;
+
+    // --- Reference file selector ---
+    refFileLabel.setBounds (margin,          y, labelW, rowH);
+    refFileCombo.setBounds (margin + labelW, y, 220,    rowH);
+    y += rowH + margin;
 
     // --- Project setup ---
     projectLabel    .setBounds (margin,                y, 110,            rowH);
@@ -239,6 +349,7 @@ void MainComponent::resized()
 
     // --- Routing selector ---
     routingLabel.setBounds (margin, y, 200, 20);
+    audioSettingsButton.setBounds (getWidth() - margin - 150, y, 150, 20);
     y += 24;
     sendLabel   .setBounds (margin,          y, labelW, rowH);
     sendCombo   .setBounds (margin + labelW, y, 220,    rowH);

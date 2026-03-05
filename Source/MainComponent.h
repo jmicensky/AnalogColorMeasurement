@@ -3,7 +3,8 @@
 #include "AudioEngine.h"
 #include "SessionWriter.h"
 
-class MainComponent : public juce::Component
+class MainComponent : public juce::Component,
+                      private juce::Timer
 {
 public:
     MainComponent();
@@ -17,6 +18,13 @@ private:
     void checkRoutingSafety (juce::ComboBox* changed);
     void onInitProjectClicked();
     void onMeasureButtonClicked();
+    void onRefFileSelected();
+    void onAudioSettingsClicked();
+    void timerCallback() override;   // polls audioEngine.isFinished()
+
+    // --- Reference file selector ---
+    juce::Label    refFileLabel  { {}, "Reference File:" };
+    juce::ComboBox refFileCombo;
 
     // --- Project setup ---
     juce::Label      projectLabel  { {}, "Project Name:" };
@@ -29,7 +37,8 @@ private:
     juce::TextButton compressorModeButton { "Compressor" };
 
     // --- Routing selector ---
-    juce::Label routingLabel;
+    juce::Label      routingLabel;
+    juce::TextButton audioSettingsButton { "Audio Settings..." };
     juce::Label sendLabel       { {}, "Send Output Pair:" };
     juce::Label returnLabel     { {}, "Return Input Pair:" };
     juce::Label monitorLabel    { {}, "Monitor Output Pair:" };

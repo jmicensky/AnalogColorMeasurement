@@ -1,7 +1,9 @@
 # Build output
 build/
---build/
--j/
+
+# Reference WAV files — large binary assets, kept local only
+# Must be present in "Reference Files/" to build (embedded via juce_add_binary_data)
+Reference Files/*.wav
 
 # macOS
 .DS_Store

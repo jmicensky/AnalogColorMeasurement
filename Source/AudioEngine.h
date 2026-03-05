@@ -9,10 +9,11 @@ public:
 
     juce::AudioDeviceManager& getDeviceManager() { return deviceManager; }
 
-    // Load a reference WAV/AIFF file. Resampling ratio is computed automatically
-    // from the file's native rate vs. the current device rate.
+    // Load a reference WAV/AIFF file from disk or from embedded binary data.
     // Returns an error string on failure, empty string on success.
     juce::String loadReferenceFile (const juce::File& file);
+    juce::String loadReferenceFileFromMemory (const void* data, size_t dataSize,
+                                              const juce::String& stem);
 
     // Returns the stem of the loaded reference file (no extension), e.g. "BASSDI_testtone".
     // Empty if no file is loaded.

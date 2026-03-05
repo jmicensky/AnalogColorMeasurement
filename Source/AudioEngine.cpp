@@ -67,6 +67,30 @@ juce::String AudioEngine::loadReferenceFile (const juce::File& file)
 }
 
 //==============================================================================
+juce::String AudioEngine::loadReferenceFileFromMemory (const void* data,
+                                                        size_t dataSize,
+                                                        const juce::String& stem)
+{
+    auto stream = std::make_unique<juce::MemoryInputStream> (data, dataSize, false);
+    auto* reader = formatManager.createReaderFor (std::move (stream));
+
+    if (reader == nullptr)
+        return "Could not decode embedded reference file: " + stem;
+
+    referenceFileStem    = stem;
+    referenceNumChannels = (int) reader->numChannels;
+
+    referenceReaderSource = std::make_unique<juce::AudioFormatReaderSource> (reader, true);
+    resamplingSource = std::make_unique<juce::ResamplingAudioSource> (
+        referenceReaderSource.get(), false, referenceNumChannels);
+
+    if (sampleRate > 0.0f && reader->sampleRate > 0)
+        resamplingSource->setResamplingRatio (reader->sampleRate / (double) sampleRate);
+
+    return {};
+}
+
+//==============================================================================
 void AudioEngine::startMeasurement()
 {
     if (resamplingSource == nullptr)
@@ -224,47 +248,39 @@ juce::String AudioEngine::writeSession (const juce::File& refFilePath,
 
     // --- Write ref.wav ---
     {
-        auto refStream = std::unique_ptr<juce::FileOutputStream> (
-            refFilePath.createOutputStream());
+        std::unique_ptr<juce::OutputStream> refStream = refFilePath.createOutputStream();
 
         if (refStream == nullptr)
             return "Could not create file: " + refFilePath.getFullPathName();
 
-        std::unique_ptr<juce::AudioFormatWriter> writer (
-            wav.createWriterFor (refStream.get(),
-                                 sampleRate,
-                                 (unsigned int) refBuffer.getNumChannels(),
-                                 24,   // 24-bit depth
-                                 {},
-                                 0));
+        auto writer = wav.createWriterFor (refStream,
+                                           juce::AudioFormatWriterOptions{}
+                                               .withSampleRate    (sampleRate)
+                                               .withNumChannels   (refBuffer.getNumChannels())
+                                               .withBitsPerSample (24));
 
         if (writer == nullptr)
             return "Could not create WAV writer for ref file.";
 
-        refStream.release();   // writer now owns the stream
         writer->writeFromAudioSampleBuffer (refBuffer, 0, capturePosition);
     }
 
     // --- Write rec.wav ---
     {
-        auto recStream = std::unique_ptr<juce::FileOutputStream> (
-            recFilePath.createOutputStream());
+        std::unique_ptr<juce::OutputStream> recStream = recFilePath.createOutputStream();
 
         if (recStream == nullptr)
             return "Could not create file: " + recFilePath.getFullPathName();
 
-        std::unique_ptr<juce::AudioFormatWriter> writer (
-            wav.createWriterFor (recStream.get(),
-                                 sampleRate,
-                                 (unsigned int) recBuffer.getNumChannels(),
-                                 24,
-                                 {},
-                                 0));
+        auto writer = wav.createWriterFor (recStream,
+                                           juce::AudioFormatWriterOptions{}
+                                               .withSampleRate    (sampleRate)
+                                               .withNumChannels   (recBuffer.getNumChannels())
+                                               .withBitsPerSample (24));
 
         if (writer == nullptr)
             return "Could not create WAV writer for rec file.";
 
-        recStream.release();
         writer->writeFromAudioSampleBuffer (recBuffer, 0, capturePosition);
     }
 
