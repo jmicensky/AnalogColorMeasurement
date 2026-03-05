@@ -23,17 +23,11 @@ MainComponent::MainComponent()
     addAndMakeVisible (returnLabel);
     addAndMakeVisible (monitorLabel);
 
-    sendCombo.addItem ("(not set)", 1);
-    sendCombo.setSelectedId (1);
     addAndMakeVisible (sendCombo);
-
-    returnCombo.addItem ("(not set)", 1);
-    returnCombo.setSelectedId (1);
     addAndMakeVisible (returnCombo);
-
-    monitorCombo.addItem ("(not set)", 1);
-    monitorCombo.setSelectedId (1);
     addAndMakeVisible (monitorCombo);
+
+    populateRoutingCombos();
 
     // --- Plan editor shell ---
     planLabel.setText ("Stimulus Plan", juce::dontSendNotification);
@@ -43,7 +37,11 @@ MainComponent::MainComponent()
     addAndMakeVisible (planList);
 
     // --- Status bar ---
-    statusLabel.setText ("Ready", juce::dontSendNotification);
+    // Query the AudioDeviceManager for the currently open device name.
+    // getCurrentAudioDevice() returns nullptr if no device is open yet.
+    auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
+    juce::String deviceName = device ? device->getName() : "No audio device";
+    statusLabel.setText ("Device: " + deviceName, juce::dontSendNotification);
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
 
@@ -51,6 +49,54 @@ MainComponent::MainComponent()
 }
 
 MainComponent::~MainComponent() {}
+
+void MainComponent::populateRoutingCombos()
+{
+    // Clear all three combos and reset to "(not set)" as item ID 1.
+    sendCombo   .clear (juce::dontSendNotification);
+    returnCombo .clear (juce::dontSendNotification);
+    monitorCombo.clear (juce::dontSendNotification);
+
+    sendCombo   .addItem ("(not set)", 1);
+    returnCombo .addItem ("(not set)", 1);
+    monitorCombo.addItem ("(not set)", 1);
+
+    auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
+
+    if (device == nullptr)
+    {
+        sendCombo   .setSelectedId (1);
+        returnCombo .setSelectedId (1);
+        monitorCombo.setSelectedId (1);
+        return;
+    }
+
+    // getOutputChannelNames() / getInputChannelNames() return a StringArray
+    // where each element is the hardware label for one channel (e.g. "Line 1").
+    // We group them into stereo pairs: channels i and i+1.
+    // Item ID = (pairIndex + 2) so ID 1 is reserved for "(not set)".
+
+    auto outNames = device->getOutputChannelNames();
+    for (int i = 0; i + 1 < outNames.size(); i += 2)
+    {
+        juce::String label = outNames[i] + " / " + outNames[i + 1];
+        int id = (i / 2) + 2;
+        sendCombo   .addItem (label, id);
+        monitorCombo.addItem (label, id);
+    }
+
+    auto inNames = device->getInputChannelNames();
+    for (int i = 0; i + 1 < inNames.size(); i += 2)
+    {
+        juce::String label = inNames[i] + " / " + inNames[i + 1];
+        int id = (i / 2) + 2;
+        returnCombo.addItem (label, id);
+    }
+
+    sendCombo   .setSelectedId (1);
+    returnCombo .setSelectedId (1);
+    monitorCombo.setSelectedId (1);
+}
 
 void MainComponent::paint (juce::Graphics& g)
 {
