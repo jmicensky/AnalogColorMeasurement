@@ -2,25 +2,20 @@
 
 AudioEngine::AudioEngine()
 {
+    // Register built-in formats (WAV, AIFF) so AudioFormatManager can decode them.
+    formatManager.registerBasicFormats();
+
     // Initialise the device manager requesting up to 32 input and 32 output
     // channels so that all channels on a multi-channel interface are available
     // for routing. JUCE will open the system default device and clamp the
     // channel count to what the hardware actually supports.
-    //
-    // Signature:
-    //   initialise(numInputChannelsNeeded,
-    //              numOutputChannelsNeeded,
-    //              savedState,               // nullptr = use defaults
-    //              selectDefaultDeviceOnFailure)
     auto result = deviceManager.initialise (32, 32, nullptr, true);
 
     if (result.isNotEmpty())
         DBG ("AudioDeviceManager initialise error: " + result);
 
-    // On macOS, initialise() may pick separate devices for input and output
-    // (e.g. system default output = audio interface, default input = built-in
-    // microphone). For measurement we need both I/O on the same hardware
-    // device. If they differ, force the input device to match the output.
+    // On macOS, initialise() may pick separate devices for input and output.
+    // For measurement we need both I/O on the same hardware device.
     auto setup = deviceManager.getAudioDeviceSetup();
 
     if (setup.outputDeviceName.isNotEmpty() &&
@@ -46,9 +41,50 @@ AudioEngine::~AudioEngine()
 }
 
 //==============================================================================
+juce::String AudioEngine::loadReferenceFile (const juce::File& file)
+{
+    auto* reader = formatManager.createReaderFor (file);
+    if (reader == nullptr)
+        return "Could not open file: " + file.getFileName();
+
+    referenceFileStem    = file.getFileNameWithoutExtension();
+    referenceNumChannels = (int) reader->numChannels;
+
+    // AudioFormatReaderSource owns the reader and streams it on demand.
+    referenceReaderSource = std::make_unique<juce::AudioFormatReaderSource> (reader, true);
+
+    // ResamplingAudioSource converts from the file's native rate to the device
+    // rate. The ratio is set correctly in audioDeviceAboutToStart(); here we
+    // pass 1.0 as a placeholder.
+    resamplingSource = std::make_unique<juce::ResamplingAudioSource> (
+        referenceReaderSource.get(), false, referenceNumChannels);
+
+    // If the device is already running, update the resampling ratio now.
+    if (sampleRate > 0.0f && reader->sampleRate > 0)
+        resamplingSource->setResamplingRatio (reader->sampleRate / (double) sampleRate);
+
+    return {};   // success
+}
+
+//==============================================================================
 void AudioEngine::startMeasurement()
 {
-    phase = 0.0f;         // reset phase so every session starts at the same point
+    if (resamplingSource == nullptr)
+        return;
+
+    // Rewind the source to the beginning of the file.
+    resamplingSource->prepareToPlay (512, sampleRate);
+    referenceReaderSource->setNextReadPosition (0);
+
+    // Pre-allocate capture buffers.
+    // refBuffer matches the reference file's channel count (mono or stereo).
+    // recBuffer is always stereo (captures both channels of the Return pair).
+    const int maxSamples = maxRecordSeconds * (int) sampleRate;
+    refBuffer.setSize (referenceNumChannels, maxSamples, false, true, false);
+    recBuffer.setSize (2,                   maxSamples, false, true, false);
+    capturePosition = 0;
+
+    finished.store (false);
     measuring.store (true);
 }
 
@@ -60,10 +96,15 @@ void AudioEngine::stopMeasurement()
 //==============================================================================
 void AudioEngine::audioDeviceAboutToStart (juce::AudioIODevice* device)
 {
-    // Called on the message thread just before the audio device starts.
-    // Capture the sample rate here so the callback can use it safely.
     sampleRate = static_cast<float> (device->getCurrentSampleRate());
-    phase      = 0.0f;
+
+    // Update the resampling ratio if a file is already loaded.
+    if (resamplingSource != nullptr && referenceReaderSource != nullptr)
+    {
+        const double fileRate = referenceReaderSource->getAudioFormatReader()->sampleRate;
+        resamplingSource->setResamplingRatio (fileRate / (double) sampleRate);
+        resamplingSource->prepareToPlay (device->getCurrentBufferSizeSamples(), sampleRate);
+    }
 }
 
 void AudioEngine::audioDeviceStopped()
@@ -73,8 +114,8 @@ void AudioEngine::audioDeviceStopped()
 
 //==============================================================================
 void AudioEngine::audioDeviceIOCallbackWithContext (
-    const float* const* /*inputChannelData*/,  int /*numInputChannels*/,
-    float* const*         outputChannelData,   int numOutputChannels,
+    const float* const* inputChannelData,  int numInputChannels,
+    float* const*       outputChannelData, int numOutputChannels,
     int numSamples,
     const juce::AudioIODeviceCallbackContext&)
 {
@@ -83,53 +124,149 @@ void AudioEngine::audioDeviceIOCallbackWithContext (
         if (outputChannelData[ch] != nullptr)
             juce::FloatVectorOperations::clear (outputChannelData[ch], numSamples);
 
-    if (!measuring.load())
+    if (! measuring.load())
         return;
 
-    const int   sendCh  = sendChannel.load();
-    const int   monCh   = monitorChannel.load();   // -1 if not set
-    const float freq    = toneFreq.load();
-    const float levelDb = toneLeveldBFS.load();
+    if (resamplingSource == nullptr)
+        return;
 
-    // A = 10^(dBFS / 20)  — converts dBFS level to linear amplitude
-    // (proposal eq. 3: A = 10^(dBFS/20))
-    const float A = std::pow (10.0f, levelDb / 20.0f);
+    const int sendCh = sendChannel  .load();
+    const int monCh  = monitorChannel.load();   // -1 if not set
+    const int retCh  = returnChannel .load();
 
-    // Phase increment per sample:  Δφ = 2π · f₀ / fₛ
-    // Used in the phase-accumulator form of:
-    //   x[n] = A · sin(2π · f₀/fₛ · n + φ₀)   (proposal eq. 4)
-    // Accumulating phase rather than computing (2π·f₀/fₛ·n) directly
-    // avoids floating-point precision loss as n grows large.
-    const float delta = juce::MathConstants<float>::twoPi * freq / sampleRate;
+    // Pull the next block of resampled samples from the reference source.
+    juce::AudioBuffer<float> playBuf (referenceNumChannels, numSamples);
+    juce::AudioSourceChannelInfo info (playBuf);
+    resamplingSource->getNextAudioBlock (info);
 
-    for (int n = 0; n < numSamples; ++n)
+    // --- Output: write to Send pair ---
+    // Mono source: duplicate to both channels of the pair.
+    // Stereo source: L → sendCh, R → sendCh+1.
+    if (sendCh >= 0 && sendCh < numOutputChannels)
     {
-        const float sample = A * std::sin (phase);
-        phase += delta;
-
-        // Write to Send pair (left = sendCh, right = sendCh + 1)
-        if (sendCh >= 0 && sendCh < numOutputChannels)
+        if (referenceNumChannels == 1)
         {
             if (outputChannelData[sendCh] != nullptr)
-                outputChannelData[sendCh][n] = sample;
+                juce::FloatVectorOperations::copy (outputChannelData[sendCh],
+                                                   playBuf.getReadPointer (0), numSamples);
 
             if (sendCh + 1 < numOutputChannels && outputChannelData[sendCh + 1] != nullptr)
-                outputChannelData[sendCh + 1][n] = sample;
+                juce::FloatVectorOperations::copy (outputChannelData[sendCh + 1],
+                                                   playBuf.getReadPointer (0), numSamples);
         }
-
-        // Mirror to Monitor pair so the user can hear the stimulus.
-        // Guard ensures Monitor never overlaps Send (safety constraint is
-        // already enforced in the UI, this is a belt-and-suspenders check).
-        if (monCh >= 0 && monCh != sendCh && monCh < numOutputChannels)
+        else
         {
-            if (outputChannelData[monCh] != nullptr)
-                outputChannelData[monCh][n] = sample;
+            if (outputChannelData[sendCh] != nullptr)
+                juce::FloatVectorOperations::copy (outputChannelData[sendCh],
+                                                   playBuf.getReadPointer (0), numSamples);
 
-            if (monCh + 1 < numOutputChannels && outputChannelData[monCh + 1] != nullptr)
-                outputChannelData[monCh + 1][n] = sample;
+            if (sendCh + 1 < numOutputChannels && outputChannelData[sendCh + 1] != nullptr)
+                juce::FloatVectorOperations::copy (outputChannelData[sendCh + 1],
+                                                   playBuf.getReadPointer (1), numSamples);
         }
     }
 
-    // Wrap phase to [0, 2π] after each buffer to prevent unbounded growth.
-    phase = std::fmod (phase, juce::MathConstants<float>::twoPi);
+    // --- Output: mirror to Monitor pair ---
+    if (monCh >= 0 && monCh != sendCh && monCh < numOutputChannels)
+    {
+        if (outputChannelData[monCh] != nullptr)
+            juce::FloatVectorOperations::copy (outputChannelData[monCh],
+                                               playBuf.getReadPointer (0), numSamples);
+
+        if (monCh + 1 < numOutputChannels && outputChannelData[monCh + 1] != nullptr)
+        {
+            const float* src = (referenceNumChannels > 1) ? playBuf.getReadPointer (1)
+                                                           : playBuf.getReadPointer (0);
+            juce::FloatVectorOperations::copy (outputChannelData[monCh + 1], src, numSamples);
+        }
+    }
+
+    // --- Capture: write to refBuffer and recBuffer ---
+    const int remaining = refBuffer.getNumSamples() - capturePosition;
+    const int toWrite   = juce::jmin (numSamples, remaining);
+
+    if (toWrite > 0)
+    {
+        // ref: copy from playBuf (what was sent out)
+        for (int ch = 0; ch < referenceNumChannels; ++ch)
+            refBuffer.copyFrom (ch, capturePosition, playBuf, ch, 0, toWrite);
+
+        // rec: copy from Return input pair
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const int srcCh = retCh + ch;
+            if (srcCh < numInputChannels && inputChannelData[srcCh] != nullptr)
+                recBuffer.copyFrom (ch, capturePosition, inputChannelData[srcCh], toWrite);
+            else
+                recBuffer.clear (ch, capturePosition, toWrite);
+        }
+
+        capturePosition += toWrite;
+    }
+
+    // --- Auto-stop when the source reaches EOF ---
+    if (referenceReaderSource->getNextReadPosition() >=
+        referenceReaderSource->getTotalLength())
+    {
+        measuring.store (false);
+        finished.store  (true);
+    }
+}
+
+//==============================================================================
+juce::String AudioEngine::writeSession (const juce::File& refFilePath,
+                                         const juce::File& recFilePath)
+{
+    if (capturePosition == 0)
+        return "No audio was captured.";
+
+    juce::WavAudioFormat wav;
+
+    // --- Write ref.wav ---
+    {
+        auto refStream = std::unique_ptr<juce::FileOutputStream> (
+            refFilePath.createOutputStream());
+
+        if (refStream == nullptr)
+            return "Could not create file: " + refFilePath.getFullPathName();
+
+        std::unique_ptr<juce::AudioFormatWriter> writer (
+            wav.createWriterFor (refStream.get(),
+                                 sampleRate,
+                                 (unsigned int) refBuffer.getNumChannels(),
+                                 24,   // 24-bit depth
+                                 {},
+                                 0));
+
+        if (writer == nullptr)
+            return "Could not create WAV writer for ref file.";
+
+        refStream.release();   // writer now owns the stream
+        writer->writeFromAudioSampleBuffer (refBuffer, 0, capturePosition);
+    }
+
+    // --- Write rec.wav ---
+    {
+        auto recStream = std::unique_ptr<juce::FileOutputStream> (
+            recFilePath.createOutputStream());
+
+        if (recStream == nullptr)
+            return "Could not create file: " + recFilePath.getFullPathName();
+
+        std::unique_ptr<juce::AudioFormatWriter> writer (
+            wav.createWriterFor (recStream.get(),
+                                 sampleRate,
+                                 (unsigned int) recBuffer.getNumChannels(),
+                                 24,
+                                 {},
+                                 0));
+
+        if (writer == nullptr)
+            return "Could not create WAV writer for rec file.";
+
+        recStream.release();
+        writer->writeFromAudioSampleBuffer (recBuffer, 0, capturePosition);
+    }
+
+    return {};   // success
 }
