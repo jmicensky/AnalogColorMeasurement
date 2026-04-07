@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 project(HardwareProfiler VERSION 1.0.0)
 
+# Generate compile_commands.json for IDE tooling (clangd, VS Code IntelliSense).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Add the JUCE directory. Adjust the path if your JUCE folder is located elsewhere.
 add_subdirectory(JUCE)
 
@@ -21,6 +24,7 @@ target_sources(HardwareProfiler PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/AudioEngine.cpp
+    Source/LatencyAligner.cpp
     Source/StimulusPlan.cpp
     Source/SessionWriter.cpp
 )

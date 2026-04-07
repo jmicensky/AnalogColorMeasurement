@@ -1,7 +1,9 @@
 #pragma once
 #include <JuceHeader.h>
 #include "AudioEngine.h"
+#include "LatencyAligner.h"
 #include "SessionWriter.h"
+#include "StimulusPlan.h"
 
 class MainComponent : public juce::Component,
                       private juce::Timer
@@ -14,13 +16,55 @@ public:
     void resized() override;
 
 private:
+    // --- Plan list model ---
+    struct PlanListModel : public juce::ListBoxModel
+    {
+        const StimulusPlan* plan { nullptr };
+
+        int getNumRows() override
+        {
+            return plan ? plan->totalSteps() : 0;
+        }
+
+        void paintListBoxItem (int row, juce::Graphics& g,
+                               int width, int height, bool /*selected*/) override
+        {
+            if (plan == nullptr || row >= plan->totalSteps())
+                return;
+
+            const auto& step     = plan->getSteps()[row];
+            const bool isCurrent = (row == plan->currentStepIndex()) && ! plan->isComplete();
+
+            if (isCurrent)
+                g.fillAll (juce::Colour (0xff2a5a8a));
+            else if (step.completed)
+                g.fillAll (juce::Colour (0xff2a4a2a));
+            else
+                g.fillAll (juce::Colour (0xff222232));
+
+            g.setColour (juce::Colours::white);
+            g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f)));
+
+            const juce::String text = juce::String (row + 1) + ".  "
+                                    + step.gainLabel + "  —  "
+                                    + step.stimulusName
+                                    + (step.completed ? "  [done]" : "");
+            g.drawText (text, 8, 0, width - 8, height, juce::Justification::centredLeft);
+        }
+    };
+
     void populateRoutingCombos();
     void checkRoutingSafety (juce::ComboBox* changed);
     void onInitProjectClicked();
+    void onBuildPlanClicked();
     void onMeasureButtonClicked();
     void onRefFileSelected();
     void onAudioSettingsClicked();
-    void timerCallback() override;   // polls audioEngine.isFinished()
+    void timerCallback() override;
+
+    // Loads a named stimulus into AudioEngine from BinaryData.
+    // Returns an error string on failure, empty string on success.
+    juce::String loadStimulusByName (const juce::String& name);
 
     // --- Reference file selector ---
     juce::Label    refFileLabel  { {}, "Reference File:" };
@@ -49,18 +93,22 @@ private:
     // --- Measurement control ---
     juce::TextButton measureButton { "Start Measurement" };
 
-    // --- Plan editor shell ---
-    juce::Label planLabel;
-    juce::ListBox planList;
+    // --- Plan editor ---
+    juce::Label      planLabel;
+    juce::Label      gainLabelsLabel { {}, "Gain Levels (csv):" };
+    juce::TextEditor gainLabelsEditor;
+    juce::TextButton buildPlanButton { "Build Plan" };
+    PlanListModel    planListModel;
+    juce::ListBox    planList;
 
     // --- Status bar ---
     juce::Label statusLabel;
 
-    // --- Session writer (owns project folder + file paths) ---
-    SessionWriter sessionWriter;
-
-    // --- Audio engine (owns AudioDeviceManager) ---
-    AudioEngine audioEngine;
+    // --- Data ---
+    SessionWriter            sessionWriter;
+    AudioEngine              audioEngine;
+    StimulusPlan             stimulusPlan;
+    juce::Array<MarkerEntry> markers;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

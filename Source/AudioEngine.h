@@ -40,6 +40,16 @@ public:
     juce::String writeSession (const juce::File& refFilePath,
                                const juce::File& recFilePath);
 
+    // Post-capture access (message thread only, call after stopMeasurement()).
+    const juce::AudioBuffer<float>& getReferenceBuffer() const { return refBuffer; }
+    const juce::AudioBuffer<float>& getRecordBuffer()    const { return recBuffer; }
+    int   getCapturePosition() const { return capturePosition; }
+    float getSampleRate()      const { return sampleRate; }
+
+    // Shifts rec data left by lagSamples and reduces capturePosition so that
+    // the next writeSession() call saves aligned ref and rec wavs.
+    void trimRecBuffer (int lagSamples);
+
 private:
     // --- AudioIODeviceCallback ---
     void audioDeviceIOCallbackWithContext (

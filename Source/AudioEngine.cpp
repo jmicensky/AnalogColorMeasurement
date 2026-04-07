@@ -238,6 +238,26 @@ void AudioEngine::audioDeviceIOCallbackWithContext (
 }
 
 //==============================================================================
+void AudioEngine::trimRecBuffer (int lagSamples)
+{
+    if (lagSamples <= 0 || lagSamples >= capturePosition)
+        return;
+
+    const int newLength = capturePosition - lagSamples;
+
+    for (int ch = 0; ch < recBuffer.getNumChannels(); ++ch)
+    {
+        float* data = recBuffer.getWritePointer (ch);
+        // memmove handles the overlapping src/dest regions correctly.
+        std::memmove (data, data + lagSamples, sizeof (float) * (size_t) newLength);
+    }
+
+    // Reduce capturePosition so writeSession() writes the same length for
+    // both ref (trimmed from the end) and rec (trimmed from the start).
+    capturePosition = newLength;
+}
+
+//==============================================================================
 juce::String AudioEngine::writeSession (const juce::File& refFilePath,
                                          const juce::File& recFilePath)
 {
