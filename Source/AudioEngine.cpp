@@ -41,6 +41,13 @@ AudioEngine::~AudioEngine()
 }
 
 //==============================================================================
+float AudioEngine::getReturnPeakDb() const
+{
+    const float p = returnPeakLinear.load();
+    return (p > 0.0f) ? 20.0f * std::log10 (p) : -100.0f;
+}
+
+//==============================================================================
 juce::String AudioEngine::loadReferenceFile (const juce::File& file)
 {
     auto* reader = formatManager.createReaderFor (file);
@@ -71,7 +78,7 @@ juce::String AudioEngine::loadReferenceFileFromMemory (const void* data,
                                                         size_t dataSize,
                                                         const juce::String& stem)
 {
-    auto stream = std::make_unique<juce::MemoryInputStream> (data, dataSize, false);
+    auto stream = std::make_unique<juce::MemoryInputStream> (data, dataSize, true);
     auto* reader = formatManager.createReaderFor (std::move (stream));
 
     if (reader == nullptr)
@@ -154,55 +161,66 @@ void AudioEngine::audioDeviceIOCallbackWithContext (
     if (resamplingSource == nullptr)
         return;
 
-    const int sendCh = sendChannel  .load();
-    const int monCh  = monitorChannel.load();   // -1 if not set
-    const int retCh  = returnChannel .load();
+    const int  sendCh = sendChannel  .load();
+    const int  monCh  = monitorChannel.load();   // -1 if not set
+    const int  retCh  = returnChannel .load();
+    const bool mono   = monoMode      .load();
 
     // Pull the next block of resampled samples from the reference source.
     juce::AudioBuffer<float> playBuf (referenceNumChannels, numSamples);
     juce::AudioSourceChannelInfo info (playBuf);
     resamplingSource->getNextAudioBlock (info);
 
-    // --- Output: write to Send pair ---
-    // Mono source: duplicate to both channels of the pair.
-    // Stereo source: L → sendCh, R → sendCh+1.
+    // --- Output: write to Send channel(s) ---
     if (sendCh >= 0 && sendCh < numOutputChannels)
     {
-        if (referenceNumChannels == 1)
+        if (mono)
         {
+            // Single channel only.
             if (outputChannelData[sendCh] != nullptr)
                 juce::FloatVectorOperations::copy (outputChannelData[sendCh],
-                                                   playBuf.getReadPointer (0), numSamples);
-
-            if (sendCh + 1 < numOutputChannels && outputChannelData[sendCh + 1] != nullptr)
-                juce::FloatVectorOperations::copy (outputChannelData[sendCh + 1],
                                                    playBuf.getReadPointer (0), numSamples);
         }
         else
         {
+            // Stereo pair: duplicate mono source or split stereo source.
             if (outputChannelData[sendCh] != nullptr)
                 juce::FloatVectorOperations::copy (outputChannelData[sendCh],
                                                    playBuf.getReadPointer (0), numSamples);
 
             if (sendCh + 1 < numOutputChannels && outputChannelData[sendCh + 1] != nullptr)
+            {
+                const float* src = (referenceNumChannels > 1) ? playBuf.getReadPointer (1)
+                                                               : playBuf.getReadPointer (0);
                 juce::FloatVectorOperations::copy (outputChannelData[sendCh + 1],
-                                                   playBuf.getReadPointer (1), numSamples);
+                                                   src, numSamples);
+            }
         }
     }
 
-    // --- Output: mirror to Monitor pair ---
+    // --- Output: mirror to Monitor channel(s) ---
     if (monCh >= 0 && monCh != sendCh && monCh < numOutputChannels)
     {
         if (outputChannelData[monCh] != nullptr)
             juce::FloatVectorOperations::copy (outputChannelData[monCh],
                                                playBuf.getReadPointer (0), numSamples);
 
-        if (monCh + 1 < numOutputChannels && outputChannelData[monCh + 1] != nullptr)
+        if (!mono && monCh + 1 < numOutputChannels && outputChannelData[monCh + 1] != nullptr)
         {
             const float* src = (referenceNumChannels > 1) ? playBuf.getReadPointer (1)
                                                            : playBuf.getReadPointer (0);
             juce::FloatVectorOperations::copy (outputChannelData[monCh + 1], src, numSamples);
         }
+    }
+
+    // --- Continuous input peak metering (always, not just while measuring) ---
+    {
+        float peak = 0.0f;
+        const int meterCh = retCh;
+        if (meterCh >= 0 && meterCh < numInputChannels && inputChannelData[meterCh] != nullptr)
+            for (int n = 0; n < numSamples; ++n)
+                peak = std::max (peak, std::abs (inputChannelData[meterCh][n]));
+        returnPeakLinear.store (peak);
     }
 
     // --- Capture: write to refBuffer and recBuffer ---
@@ -211,18 +229,35 @@ void AudioEngine::audioDeviceIOCallbackWithContext (
 
     if (toWrite > 0)
     {
-        // ref: copy from playBuf (what was sent out)
+        // ref: copy from playBuf (what was sent out), always channel 0.
         for (int ch = 0; ch < referenceNumChannels; ++ch)
             refBuffer.copyFrom (ch, capturePosition, playBuf, ch, 0, toWrite);
 
-        // rec: copy from Return input pair
-        for (int ch = 0; ch < 2; ++ch)
+        // rec: mono = single return channel into both rec channels;
+        //      stereo = Return pair as before.
+        if (mono)
         {
-            const int srcCh = retCh + ch;
-            if (srcCh < numInputChannels && inputChannelData[srcCh] != nullptr)
-                recBuffer.copyFrom (ch, capturePosition, inputChannelData[srcCh], toWrite);
+            if (retCh < numInputChannels && inputChannelData[retCh] != nullptr)
+            {
+                recBuffer.copyFrom (0, capturePosition, inputChannelData[retCh], toWrite);
+                recBuffer.copyFrom (1, capturePosition, inputChannelData[retCh], toWrite);
+            }
             else
-                recBuffer.clear (ch, capturePosition, toWrite);
+            {
+                recBuffer.clear (0, capturePosition, toWrite);
+                recBuffer.clear (1, capturePosition, toWrite);
+            }
+        }
+        else
+        {
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const int srcCh = retCh + ch;
+                if (srcCh < numInputChannels && inputChannelData[srcCh] != nullptr)
+                    recBuffer.copyFrom (ch, capturePosition, inputChannelData[srcCh], toWrite);
+                else
+                    recBuffer.clear (ch, capturePosition, toWrite);
+            }
         }
 
         capturePosition += toWrite;
@@ -273,17 +308,18 @@ juce::String AudioEngine::writeSession (const juce::File& refFilePath,
         if (refStream == nullptr)
             return "Could not create file: " + refFilePath.getFullPathName();
 
-        auto writer = wav.createWriterFor (refStream,
-                                           juce::AudioFormatWriterOptions{}
-                                               .withSampleRate    (sampleRate)
-                                               .withNumChannels   (refBuffer.getNumChannels())
-                                               .withBitsPerSample (24));
+        auto writer = std::unique_ptr<juce::AudioFormatWriter> (
+            wav.createWriterFor (refStream,
+                                 juce::AudioFormatWriterOptions{}
+                                     .withSampleRate    (sampleRate)
+                                     .withNumChannels   (refBuffer.getNumChannels())
+                                     .withBitsPerSample (24)));
 
         if (writer == nullptr)
             return "Could not create WAV writer for ref file.";
 
         writer->writeFromAudioSampleBuffer (refBuffer, 0, capturePosition);
-    }
+    }   // writer destroyed here → flushes + finalises WAV header
 
     // --- Write rec.wav ---
     {
@@ -292,17 +328,18 @@ juce::String AudioEngine::writeSession (const juce::File& refFilePath,
         if (recStream == nullptr)
             return "Could not create file: " + recFilePath.getFullPathName();
 
-        auto writer = wav.createWriterFor (recStream,
-                                           juce::AudioFormatWriterOptions{}
-                                               .withSampleRate    (sampleRate)
-                                               .withNumChannels   (recBuffer.getNumChannels())
-                                               .withBitsPerSample (24));
+        auto writer = std::unique_ptr<juce::AudioFormatWriter> (
+            wav.createWriterFor (recStream,
+                                 juce::AudioFormatWriterOptions{}
+                                     .withSampleRate    (sampleRate)
+                                     .withNumChannels   (recBuffer.getNumChannels())
+                                     .withBitsPerSample (24)));
 
         if (writer == nullptr)
             return "Could not create WAV writer for rec file.";
 
         writer->writeFromAudioSampleBuffer (recBuffer, 0, capturePosition);
-    }
+    }   // writer destroyed here → flushes + finalises WAV header
 
     return {};   // success
 }

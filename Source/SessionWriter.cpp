@@ -22,9 +22,15 @@ juce::String SessionWriter::initialise (const juce::String& name,
     if (! result.wasOk())
         return "Could not create project folder: " + result.getErrorMessage();
 
+    juce::File archive = baseDir.getChildFile (safeName + "_raw");
+    auto archiveResult = archive.createDirectory();
+    if (! archiveResult.wasOk())
+        return "Could not create archive folder: " + archiveResult.getErrorMessage();
+
     projectName   = safeName;
     mode          = modeName.toLowerCase();
     projectFolder = folder;
+    archiveFolder = archive;
     initialised   = true;
 
     return {};
@@ -56,19 +62,33 @@ juce::String SessionWriter::sanitiseLabel (const juce::String& label)
 juce::File SessionWriter::getStepRefFilePath (const StimulusStep& step) const
 {
     const juce::String stem = projectName + "_" + mode
-                            + "_" + sanitiseLabel (step.gainLabel)
-                            + "_" + step.stimulusName
-                            + "_ref.wav";
-    return projectFolder.getChildFile (stem);
+                            + "_" + step.stimulusName + "_ref.wav";
+    return projectFolder.getChildFile (sanitiseLabel (step.gainLabel))
+                        .getChildFile (stem);
 }
 
 juce::File SessionWriter::getStepRecFilePath (const StimulusStep& step) const
 {
     const juce::String stem = projectName + "_" + mode
-                            + "_" + sanitiseLabel (step.gainLabel)
-                            + "_" + step.stimulusName
-                            + "_rec.wav";
-    return projectFolder.getChildFile (stem);
+                            + "_" + step.stimulusName + "_rec.wav";
+    return projectFolder.getChildFile (sanitiseLabel (step.gainLabel))
+                        .getChildFile (stem);
+}
+
+juce::File SessionWriter::getStepArchiveRefFilePath (const StimulusStep& step) const
+{
+    const juce::String stem = projectName + "_" + mode
+                            + "_" + step.stimulusName + "_ref.wav";
+    return archiveFolder.getChildFile (sanitiseLabel (step.gainLabel))
+                        .getChildFile (stem);
+}
+
+juce::File SessionWriter::getStepArchiveRecFilePath (const StimulusStep& step) const
+{
+    const juce::String stem = projectName + "_" + mode
+                            + "_" + step.stimulusName + "_rec.wav";
+    return archiveFolder.getChildFile (sanitiseLabel (step.gainLabel))
+                        .getChildFile (stem);
 }
 
 //==============================================================================

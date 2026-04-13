@@ -29,10 +29,16 @@ public:
     bool isFinished() const { return finished.load(); }
 
     // Routing — set before calling startMeasurement().
-    // firstChannel is the 0-based index of the left channel in the pair.
+    // firstChannel is the 0-based index of the left channel in the pair (stereo)
+    // or the single channel index (mono).
     void setSendChannelPair    (int firstChannel) { sendChannel   .store (firstChannel); }
     void setMonitorChannelPair (int firstChannel) { monitorChannel.store (firstChannel); }
     void setReturnChannelPair  (int firstChannel) { returnChannel .store (firstChannel); }
+
+    // When mono mode is on, the engine uses a single send channel and a single
+    // return channel rather than stereo pairs.
+    void setMonoMode (bool mono) { monoMode.store (mono); }
+    bool getMonoMode() const     { return monoMode.load(); }
 
     // Write ref.wav and rec.wav into the session folder.
     // Call this from the message thread after stopMeasurement().
@@ -49,6 +55,10 @@ public:
     // Shifts rec data left by lagSamples and reduces capturePosition so that
     // the next writeSession() call saves aligned ref and rec wavs.
     void trimRecBuffer (int lagSamples);
+
+    // Current peak level (dBFS) of the configured return channel.
+    // Updated continuously by the audio callback — safe to call from any thread.
+    float getReturnPeakDb() const;
 
 private:
     // --- AudioIODeviceCallback ---
@@ -84,11 +94,13 @@ private:
     int capturePosition { 0 };   // audio-thread write head (samples written so far)
 
     // --- Shared state (message thread writes, audio thread reads) ---
-    std::atomic<bool> measuring      { false };
-    std::atomic<bool> finished       { false };
-    std::atomic<int>  sendChannel    { 0 };
-    std::atomic<int>  monitorChannel { -1 };   // -1 = not set
-    std::atomic<int>  returnChannel  { 0 };
+    std::atomic<bool>  measuring      { false };
+    std::atomic<bool>  finished       { false };
+    std::atomic<bool>  monoMode       { false };
+    std::atomic<int>   sendChannel    { 0 };
+    std::atomic<int>   monitorChannel { -1 };   // -1 = not set
+    std::atomic<int>   returnChannel  { 0 };
+    std::atomic<float> returnPeakLinear { 0.0f };
 
     // --- Audio-thread-only state ---
     float sampleRate { 44100.0f };

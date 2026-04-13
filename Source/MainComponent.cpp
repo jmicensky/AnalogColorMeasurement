@@ -1,4 +1,7 @@
 #include "MainComponent.h"
+#include "SignalGenerator.h"
+#include "AnalysisEngine.h"
+#include "ArtifactFile.h"
 #include <BinaryData.h>
 
 MainComponent::MainComponent()
@@ -11,6 +14,10 @@ MainComponent::MainComponent()
     refFileCombo.addItem ("DRUMS",         2);
     refFileCombo.addItem ("BASSDI",        3);
     refFileCombo.addItem ("ElecKeys",      4);
+    refFileCombo.addItem ("Sine Sweep",    5);
+    refFileCombo.addItem ("Pink Noise",    6);
+    refFileCombo.addItem ("Sine 1 kHz",    7);
+    refFileCombo.addItem ("Sine 100 Hz",   8);
     refFileCombo.setSelectedId (1);
     refFileCombo.onChange = [this] { onRefFileSelected(); };
     addAndMakeVisible (refFileCombo);
@@ -19,12 +26,19 @@ MainComponent::MainComponent()
     projectLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (projectLabel);
 
-    projectNameEditor.setTextToShowWhenEmpty ("Enter project name...",
+    populateProjectCombo();
+    projectCombo.onChange = [this] { onProjectComboChanged(); };
+    addAndMakeVisible (projectCombo);
+    onProjectComboChanged();   // auto-initialise whichever project the combo shows on launch
+
+    projectNameEditor.setTextToShowWhenEmpty ("Enter new project name...",
                                               juce::Colours::grey);
     projectNameEditor.setInputRestrictions (64);
+    projectNameEditor.setVisible (true);   // visible when "New Project..." is active
     addAndMakeVisible (projectNameEditor);
 
     initProjectButton.onClick = [this] { onInitProjectClicked(); };
+    initProjectButton.setVisible (true);
     addAndMakeVisible (initProjectButton);
 
     // --- Mode selector ---
@@ -38,6 +52,38 @@ MainComponent::MainComponent()
 
     compressorModeButton.setClickingTogglesState (true);
     addAndMakeVisible (compressorModeButton);
+
+    // --- Capture quality selector ---
+    qualityLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
+    addAndMakeVisible (qualityLabel);
+
+    auto setupQualityButton = [this] (juce::TextButton& btn, CaptureQuality q)
+    {
+        btn.setClickingTogglesState (true);
+        btn.setToggleState (q == captureQuality, juce::dontSendNotification);
+        btn.onClick = [this, &btn, q]
+        {
+            captureQuality = q;
+            quickButton   .setToggleState (&btn == &quickButton,    juce::dontSendNotification);
+            standardButton.setToggleState (&btn == &standardButton, juce::dontSendNotification);
+            hifiButton    .setToggleState (&btn == &hifiButton,     juce::dontSendNotification);
+        };
+        addAndMakeVisible (btn);
+    };
+
+    setupQualityButton (quickButton,    CaptureQuality::Quick);
+    setupQualityButton (standardButton, CaptureQuality::Standard);
+    setupQualityButton (hifiButton,     CaptureQuality::HiFi);
+
+    // --- Input level meter ---
+    inputMeterLabel.setText ("IN: ---", juce::dontSendNotification);
+    inputMeterLabel.setJustificationType (juce::Justification::centred);
+    inputMeterLabel.setColour (juce::Label::backgroundColourId, juce::Colours::black);
+    inputMeterLabel.setColour (juce::Label::textColourId, juce::Colours::limegreen);
+    addAndMakeVisible (inputMeterLabel);
+
+    meterTimer.owner = this;
+    meterTimer.startTimer (100);
 
     // --- Routing selector ---
     audioSettingsButton.onClick = [this] { onAudioSettingsClicked(); };
@@ -60,10 +106,24 @@ MainComponent::MainComponent()
     sendCombo   .onChange = [this] { checkRoutingSafety (&sendCombo); };
     monitorCombo.onChange = [this] { checkRoutingSafety (&monitorCombo); };
 
+    monoModeToggle.setToggleState (false, juce::dontSendNotification);
+    monoModeToggle.onStateChange = [this]
+    {
+        const bool mono = monoModeToggle.getToggleState();
+        audioEngine.setMonoMode (mono);
+        // In mono mode the monitor pair is unused — disable it.
+        monitorCombo.setEnabled (! mono);
+        monitorLabel.setEnabled (! mono);
+    };
+    addAndMakeVisible (monoModeToggle);
+
     // --- Measurement control ---
     measureButton.setClickingTogglesState (true);
     measureButton.onClick = [this] { onMeasureButtonClicked(); };
     addAndMakeVisible (measureButton);
+
+    analyseButton.onClick = [this] { onAnalyseClicked(); };
+    addAndMakeVisible (analyseButton);
 
     // --- Plan editor ---
     planLabel.setText ("Stimulus Plan", juce::dontSendNotification);
@@ -102,6 +162,7 @@ MainComponent::~MainComponent() {}
 //==============================================================================
 juce::String MainComponent::loadStimulusByName (const juce::String& name)
 {
+    // --- Embedded binary reference files ---
     struct Entry { const void* data; size_t size; const char* stem; };
     const Entry entries[] = {
         { BinaryData::DRUMS_testtone_wav,    (size_t) BinaryData::DRUMS_testtone_wavSize,    "DRUMS"    },
@@ -113,10 +174,130 @@ juce::String MainComponent::loadStimulusByName (const juce::String& name)
         if (name == e.stem)
             return audioEngine.loadReferenceFileFromMemory (e.data, e.size, e.stem);
 
-    return "Unknown stimulus: " + name;
+    // --- Generated test signals ---
+    auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
+    const double sr = device ? device->getCurrentSampleRate() : 44100.0;
+
+    juce::MemoryBlock wav;
+
+    if (name == "SineSweep")
+        wav = SignalGenerator::makeLogSineSweep (10.0f, sr);
+    else if (name == "PinkNoise")
+        wav = SignalGenerator::makePinkNoise    (10.0f, sr);
+    else if (name == "Sine1kHz")
+        wav = SignalGenerator::makeSineTone     (1000.0f,  10.0f, sr);
+    else if (name == "Sine100Hz")
+        wav = SignalGenerator::makeSineTone     (100.0f, 10.0f, sr);
+    else
+        return "Unknown stimulus: " + name;
+
+    return audioEngine.loadReferenceFileFromMemory (wav.getData(), wav.getSize(), name);
 }
 
 //==============================================================================
+void MainComponent::MeterTimer::timerCallback()
+{
+    const float db = owner->audioEngine.getReturnPeakDb();
+    juce::String text;
+    if (db <= -100.0f)
+        text = "IN: silence";
+    else
+        text = "IN: " + juce::String (db, 1) + " dBFS";
+
+    // Colour: green below -18, yellow -18 to -6, red above -6
+    juce::Colour colour = (db < -18.0f) ? juce::Colours::limegreen
+                        : (db < -6.0f)  ? juce::Colours::yellow
+                                         : juce::Colours::red;
+
+    owner->inputMeterLabel.setText (text, juce::dontSendNotification);
+    owner->inputMeterLabel.setColour (juce::Label::textColourId, colour);
+}
+
+void MainComponent::populateProjectCombo()
+{
+    const int prevId = projectCombo.getSelectedId();
+
+    projectCombo.clear (juce::dontSendNotification);
+    projectCombo.addItem ("+ New Project...", 1);
+
+    const juce::File baseDir = juce::File::getSpecialLocation (
+        juce::File::userDocumentsDirectory).getChildFile ("HardwareProfiler");
+
+    if (baseDir.isDirectory())
+    {
+        // Collect subdirs that are not raw-archive folders, sorted newest first.
+        juce::Array<juce::File> folders;
+        for (const auto& f : baseDir.findChildFiles (juce::File::findDirectories, false))
+            if (! f.getFileName().endsWith ("_raw"))
+                folders.add (f);
+
+        std::sort (folders.begin(), folders.end(), [] (const juce::File& a, const juce::File& b) {
+            return a.getLastModificationTime() > b.getLastModificationTime();
+        });
+
+        for (int i = 0; i < folders.size(); ++i)
+            projectCombo.addItem (folders[i].getFileName(), i + 2);
+    }
+
+    // Restore previous selection if it still exists, otherwise default to item 1.
+    if (prevId > 0 && projectCombo.indexOfItemId (prevId) >= 0)
+        projectCombo.setSelectedId (prevId, juce::dontSendNotification);
+    else
+        projectCombo.setSelectedId (1, juce::dontSendNotification);
+
+    // Show new-project editor only when item 1 ("+ New Project...") is active.
+    const bool isNew = (projectCombo.getSelectedId() == 1);
+    projectNameEditor.setVisible (isNew);
+    initProjectButton.setVisible (isNew);
+}
+
+void MainComponent::onProjectComboChanged()
+{
+    const int id = projectCombo.getSelectedId();
+    const bool isNew = (id == 1);
+
+    projectNameEditor.setVisible (isNew);
+    initProjectButton.setVisible (isNew);
+    resized();   // reflow layout to reclaim / restore the editor row
+
+    if (isNew)
+        return;
+
+    // Existing project selected — auto-initialise.
+    const juce::String name = projectCombo.getItemText (projectCombo.indexOfItemId (id));
+    const juce::String mode = readModeFromSessionJson (
+        juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+            .getChildFile ("HardwareProfiler")
+            .getChildFile (name));
+
+    // Sync mode buttons to whatever was recorded in the session file.
+    saturationModeButton.setToggleState (mode == "saturation", juce::dontSendNotification);
+    compressorModeButton.setToggleState (mode == "compressor", juce::dontSendNotification);
+
+    auto err = sessionWriter.initialise (name, mode);
+    if (err.isNotEmpty())
+    {
+        statusLabel.setText ("ERROR opening project: " + err, juce::dontSendNotification);
+        return;
+    }
+
+    statusLabel.setText ("Opened project: "
+                         + sessionWriter.getProjectFolder().getFullPathName(),
+                         juce::dontSendNotification);
+}
+
+juce::String MainComponent::readModeFromSessionJson (const juce::File& folder) const
+{
+    const auto json = juce::JSON::parse (
+        folder.getChildFile ("session.json").loadFileAsString());
+
+    if (const auto* obj = json.getDynamicObject())
+        if (obj->hasProperty ("mode"))
+            return obj->getProperty ("mode").toString();
+
+    return "saturation";   // sensible default if session.json absent
+}
+
 void MainComponent::onInitProjectClicked()
 {
     juce::String mode = saturationModeButton.getToggleState() ? "saturation"
@@ -130,7 +311,23 @@ void MainComponent::onInitProjectClicked()
         return;
     }
 
-    initProjectButton.setButtonText ("Project: " + sessionWriter.getProjectName());
+    populateProjectCombo();
+
+    // Select the newly created project in the combo (it will be the newest folder).
+    for (int i = 0; i < projectCombo.getNumItems(); ++i)
+    {
+        if (projectCombo.getItemText (i) == sessionWriter.getProjectName())
+        {
+            projectCombo.setSelectedId (projectCombo.getItemId (i), juce::dontSendNotification);
+            break;
+        }
+    }
+
+    // Hide the new-project editor row now that a project is active.
+    projectNameEditor.setVisible (false);
+    initProjectButton.setVisible (false);
+    resized();
+
     statusLabel.setText ("Project initialized: "
                          + sessionWriter.getProjectFolder().getFullPathName(),
                          juce::dontSendNotification);
@@ -153,23 +350,98 @@ void MainComponent::onBuildPlanClicked()
         return;
     }
 
-    stimulusPlan.build (csv);
+    stimulusPlan.build (csv, captureQuality);
     markers.clear();
+
+    // Resume: advance past any steps whose ref file already exists on disk.
+    int resumedSteps = 0;
+    while (! stimulusPlan.isComplete())
+    {
+        const auto* step = stimulusPlan.getCurrentStep();
+        if (sessionWriter.getStepRefFilePath (*step).existsAsFile())
+        {
+            stimulusPlan.advance();
+            ++resumedSteps;
+        }
+        else
+        {
+            break;
+        }
+    }
 
     planList.updateContent();
     planList.repaint();
 
-    const int numGains = juce::StringArray::fromTokens (csv, ",", "").size();
-    statusLabel.setText ("Plan built: "
+    const int numGains   = juce::StringArray::fromTokens (csv, ",", "").size();
+    const int numStimuli = (int) StimulusNames::forQuality (captureQuality).size();
+    const juce::String qualityName = (captureQuality == CaptureQuality::Quick)    ? "Quick"
+                                   : (captureQuality == CaptureQuality::Standard) ? "Standard"
+                                                                                   : "Hi-Fi";
+    juce::String statusMsg = "Plan built: "
                          + juce::String (stimulusPlan.totalSteps())
                          + " steps  ("
                          + juce::String (numGains)
-                         + " gain levels \xc3\x97 "       // UTF-8 multiplication sign
-                         + juce::String (StimulusNames::all.size())
-                         + " stimuli).  Set hardware to \""
-                         + stimulusPlan.getCurrentStep()->gainLabel
-                         + "\" then press Start Measurement.",
-                         juce::dontSendNotification);
+                         + " gain levels \xc3\x97 "
+                         + juce::String (numStimuli)
+                         + " stimuli, "
+                         + qualityName + ").";
+
+    if (resumedSteps > 0)
+        statusMsg += "  Resumed: " + juce::String (resumedSteps) + " steps already done.";
+
+    if (! stimulusPlan.isComplete())
+        statusMsg += "  Set hardware to \""
+                     + stimulusPlan.getCurrentStep()->gainLabel
+                     + "\" then press Start Measurement.";
+    else
+        statusMsg += "  All steps already complete — ready to Analyze.";
+
+    statusLabel.setText (statusMsg, juce::dontSendNotification);
+}
+
+void MainComponent::onAnalyseClicked()
+{
+    if (! sessionWriter.isInitialised())
+    {
+        statusLabel.setText ("ERROR: Initialize a project before analyzing.",
+                             juce::dontSendNotification);
+        return;
+    }
+
+    statusLabel.setText ("Analyzing captures...", juce::dontSendNotification);
+
+    LNLModel model;
+    const juce::String err = AnalysisEngine::analyseProjectFolder (
+        sessionWriter.getProjectFolder(),
+        sessionWriter.getProjectName(),
+        model);
+
+    if (err.isNotEmpty())
+    {
+        statusLabel.setText ("ERROR analyzing: " + err, juce::dontSendNotification);
+        return;
+    }
+
+    model.sampleRate = [this]() -> double {
+        auto* dev = audioEngine.getDeviceManager().getCurrentAudioDevice();
+        return dev ? dev->getCurrentSampleRate() : 44100.0;
+    }();
+
+    const juce::File artifactFile = sessionWriter.getProjectFolder()
+        .getChildFile (sessionWriter.getProjectName() + "_model.json");
+
+    const juce::String saveErr = ArtifactFile::save (model, artifactFile);
+    if (saveErr.isNotEmpty())
+    {
+        statusLabel.setText ("ERROR saving artifact: " + saveErr, juce::dontSendNotification);
+        return;
+    }
+
+    juce::String summary = "Model saved: " + artifactFile.getFileName()
+        + "  |  THD entries: " + juce::String ((int) model.thdResults.size())
+        + "  |  FR bins: "     + juce::String ((int) model.frFrequencies.size())
+        + "  |  Waveshaper: "  + juce::String ((int) model.waveshaper.size()) + " pts";
+    statusLabel.setText (summary, juce::dontSendNotification);
 }
 
 void MainComponent::onAudioSettingsClicked()
@@ -210,7 +482,8 @@ void MainComponent::onRefFileSelected()
     if (id < 2)
         return;
 
-    const juce::StringArray names { "DRUMS", "BASSDI", "ElecKeys" };
+    const juce::StringArray names { "DRUMS", "BASSDI", "ElecKeys",
+                                    "SineSweep", "PinkNoise", "Sine1kHz", "Sine100Hz" };
     const juce::String name = names[id - 2];
 
     auto err = loadStimulusByName (name);
@@ -243,6 +516,15 @@ void MainComponent::timerCallback()
             audioEngine.getRecordBuffer(),
             audioEngine.getCapturePosition(),
             audioEngine.getSampleRate());
+
+        // Ensure per-gain subfolders exist in both working and archive locations.
+        refPath.getParentDirectory().createDirectory();
+        sessionWriter.getStepArchiveRefFilePath (step).getParentDirectory().createDirectory();
+
+        // Write raw (pre-trim) copies to archive folder BEFORE any processing.
+        audioEngine.writeSession (sessionWriter.getStepArchiveRefFilePath (step),
+                                  sessionWriter.getStepArchiveRecFilePath (step));
+
         audioEngine.trimRecBuffer (lag);
 
         auto err = audioEngine.writeSession (refPath, recPath);
@@ -270,9 +552,12 @@ void MainComponent::timerCallback()
         // Write metadata after every completed step so nothing is lost on abort.
         auto* device    = audioEngine.getDeviceManager().getCurrentAudioDevice();
         const float sr  = device ? (float) device->getCurrentSampleRate() : 44100.0f;
-        const int sendCh    = (sendCombo   .getSelectedId() - 2) * 2;
-        const int returnCh  = (returnCombo .getSelectedId() - 2) * 2;
-        const int monitorCh = (monitorCombo.getSelectedId() == 1)
+        const bool monoTimer = monoModeToggle.getToggleState();
+        const int sendCh    = monoTimer ? (sendCombo.getSelectedId() - 2)
+                                        : (sendCombo.getSelectedId() - 2) * 2;
+        const int returnCh  = monoTimer ? (returnCombo.getSelectedId() - 2)
+                                        : (returnCombo.getSelectedId() - 2) * 2;
+        const int monitorCh = (monoTimer || monitorCombo.getSelectedId() == 1)
                                   ? -1
                                   : (monitorCombo.getSelectedId() - 2) * 2;
 
@@ -378,10 +663,14 @@ void MainComponent::onMeasureButtonClicked()
         return;
     }
 
-    // Decode channel pair indices from combo IDs: firstChannel = (id - 2) * 2
-    const int sendCh    = (sendCombo   .getSelectedId() - 2) * 2;
-    const int returnCh  = (returnCombo .getSelectedId() - 2) * 2;
-    const int monitorCh = (monitorCombo.getSelectedId() == 1)
+    // Decode channel indices from combo IDs.
+    // Stereo: firstChannel = (id - 2) * 2.  Mono: channel = id - 2.
+    const bool monoNow = monoModeToggle.getToggleState();
+    const int sendCh    = monoNow ? (sendCombo.getSelectedId() - 2)
+                                  : (sendCombo.getSelectedId() - 2) * 2;
+    const int returnCh  = monoNow ? (returnCombo.getSelectedId() - 2)
+                                  : (returnCombo.getSelectedId() - 2) * 2;
+    const int monitorCh = (monoNow || monitorCombo.getSelectedId() == 1)
                               ? -1
                               : (monitorCombo.getSelectedId() - 2) * 2;
 
@@ -415,6 +704,8 @@ void MainComponent::onMeasureButtonClicked()
 //==============================================================================
 void MainComponent::populateRoutingCombos()
 {
+    const bool mono = monoModeToggle.getToggleState();
+
     sendCombo   .clear (juce::dontSendNotification);
     returnCombo .clear (juce::dontSendNotification);
     monitorCombo.clear (juce::dontSendNotification);
@@ -434,25 +725,45 @@ void MainComponent::populateRoutingCombos()
     }
 
     auto outNames = device->getOutputChannelNames();
-    for (int i = 0; i + 1 < outNames.size(); i += 2)
+    if (mono)
     {
-        juce::String label = outNames[i] + " / " + outNames[i + 1];
-        int id = (i / 2) + 2;
-        sendCombo   .addItem (label, id);
-        monitorCombo.addItem (label, id);
+        // Mono: list every single output channel.
+        for (int i = 0; i < outNames.size(); ++i)
+            sendCombo.addItem (outNames[i], i + 2);
+    }
+    else
+    {
+        for (int i = 0; i + 1 < outNames.size(); i += 2)
+        {
+            juce::String label = outNames[i] + " / " + outNames[i + 1];
+            int id = (i / 2) + 2;
+            sendCombo   .addItem (label, id);
+            monitorCombo.addItem (label, id);
+        }
     }
 
     auto inNames = device->getInputChannelNames();
-    for (int i = 0; i + 1 < inNames.size(); i += 2)
+    if (mono)
     {
-        juce::String label = inNames[i] + " / " + inNames[i + 1];
-        int id = (i / 2) + 2;
-        returnCombo.addItem (label, id);
+        for (int i = 0; i < inNames.size(); ++i)
+            returnCombo.addItem (inNames[i], i + 2);
+    }
+    else
+    {
+        for (int i = 0; i + 1 < inNames.size(); i += 2)
+        {
+            juce::String label = inNames[i] + " / " + inNames[i + 1];
+            int id = (i / 2) + 2;
+            returnCombo.addItem (label, id);
+        }
     }
 
     sendCombo   .setSelectedId (1);
     returnCombo .setSelectedId (1);
     monitorCombo.setSelectedId (1);
+
+    monitorCombo.setEnabled (! mono);
+    monitorLabel.setEnabled (! mono);
 }
 
 void MainComponent::checkRoutingSafety (juce::ComboBox* changed)
@@ -479,11 +790,11 @@ void MainComponent::paint (juce::Graphics& g)
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
 
     g.setColour (juce::Colours::grey);
-    g.drawHorizontalLine (52,               10.0f, (float) getWidth() - 10);
-    g.drawHorizontalLine (96,               10.0f, (float) getWidth() - 10);
-    g.drawHorizontalLine (152,              10.0f, (float) getWidth() - 10);
-    g.drawHorizontalLine (282,              10.0f, (float) getWidth() - 10);
-    g.drawHorizontalLine (getHeight() - 30, 10.0f, (float) getWidth() - 10);
+    g.drawHorizontalLine (52,               10.0f, (float) getWidth() - 10);  // below ref selector
+    g.drawHorizontalLine (96,               10.0f, (float) getWidth() - 10);  // below project
+    g.drawHorizontalLine (152,              10.0f, (float) getWidth() - 10);  // below mode
+    g.drawHorizontalLine (318,              10.0f, (float) getWidth() - 10);  // below routing+mono
+    g.drawHorizontalLine (getHeight() - 30, 10.0f, (float) getWidth() - 10);  // above status
 }
 
 void MainComponent::resized()
@@ -499,17 +810,31 @@ void MainComponent::resized()
     y += rowH + margin;
 
     // --- Project setup ---
-    projectLabel     .setBounds (margin,              y, 110, rowH);
-    projectNameEditor.setBounds (margin + 115,        y, 260, rowH);
-    initProjectButton.setBounds (margin + 115 + 268,  y, 160, rowH);
-    y += rowH + margin + 4;
+    projectLabel.setBounds (margin,        y, 80,  rowH);
+    projectCombo.setBounds (margin + 85,   y, 340, rowH);
+    y += rowH + 6;
+
+    if (projectNameEditor.isVisible())
+    {
+        projectNameEditor.setBounds (margin + 85,       y, 240, rowH);
+        initProjectButton.setBounds (margin + 85 + 248, y, 130, rowH);
+        y += rowH + 6;
+    }
+    y += 4;
 
     // --- Mode selector ---
     modeLabel.setBounds (margin, y, 200, 20);
     y += 22;
     saturationModeButton.setBounds (margin,       y, 130, rowH);
     compressorModeButton.setBounds (margin + 140, y, 130, rowH);
-    y += rowH + margin + 14;
+    y += rowH + 8;
+
+    // --- Capture quality selector ---
+    qualityLabel  .setBounds (margin,       y, 130, rowH);
+    quickButton   .setBounds (margin + 135, y,  80, rowH);
+    standardButton.setBounds (margin + 225, y,  90, rowH);
+    hifiButton    .setBounds (margin + 325, y,  70, rowH);
+    y += rowH + margin + 6;
 
     // --- Routing selector ---
     routingLabel       .setBounds (margin,                    y, 200, 20);
@@ -518,15 +843,19 @@ void MainComponent::resized()
     sendLabel  .setBounds (margin,          y, labelW, rowH);
     sendCombo  .setBounds (margin + labelW, y, 220,    rowH);
     y += rowH + 6;
-    returnLabel.setBounds (margin,          y, labelW, rowH);
-    returnCombo.setBounds (margin + labelW, y, 220,    rowH);
+    returnLabel     .setBounds (margin,              y, labelW, rowH);
+    returnCombo     .setBounds (margin + labelW,     y, 220,    rowH);
+    inputMeterLabel .setBounds (margin + labelW + 228, y, 130,  rowH);
     y += rowH + 6;
     monitorLabel.setBounds (margin,          y, labelW, rowH);
     monitorCombo.setBounds (margin + labelW, y, 220,    rowH);
-    y += rowH + margin + 6;
+    y += rowH + 6;
+    monoModeToggle.setBounds (margin, y, 260, rowH);
+    y += rowH + margin + 2;
 
     // --- Measurement control ---
-    measureButton.setBounds (margin, y, 200, rowH);
+    measureButton.setBounds (margin,       y, 200, rowH);
+    analyseButton.setBounds (margin + 210, y, 180, rowH);
     y += rowH + margin + 8;
 
     // --- Plan editor ---

@@ -54,12 +54,16 @@ private:
     };
 
     void populateRoutingCombos();
+    void populateProjectCombo();
     void checkRoutingSafety (juce::ComboBox* changed);
+    void onProjectComboChanged();
     void onInitProjectClicked();
     void onBuildPlanClicked();
+    juce::String readModeFromSessionJson (const juce::File& folder) const;
     void onMeasureButtonClicked();
     void onRefFileSelected();
     void onAudioSettingsClicked();
+    void onAnalyseClicked();
     void timerCallback() override;
 
     // Loads a named stimulus into AudioEngine from BinaryData.
@@ -71,14 +75,22 @@ private:
     juce::ComboBox refFileCombo;
 
     // --- Project setup ---
-    juce::Label      projectLabel  { {}, "Project Name:" };
+    juce::Label      projectLabel  { {}, "Project:" };
+    juce::ComboBox   projectCombo;
     juce::TextEditor projectNameEditor;
-    juce::TextButton initProjectButton { "Initialize Project" };
+    juce::TextButton initProjectButton { "Create Project" };
 
     // --- Mode selector ---
     juce::Label modeLabel;
     juce::TextButton saturationModeButton { "Saturation" };
     juce::TextButton compressorModeButton { "Compressor" };
+
+    // --- Capture quality selector ---
+    juce::Label      qualityLabel  { {}, "Capture Quality:" };
+    juce::TextButton quickButton    { "Quick" };
+    juce::TextButton standardButton { "Standard" };
+    juce::TextButton hifiButton     { "Hi-Fi" };
+    CaptureQuality   captureQuality { CaptureQuality::Standard };
 
     // --- Routing selector ---
     juce::Label      routingLabel;
@@ -89,9 +101,11 @@ private:
     juce::ComboBox sendCombo;
     juce::ComboBox returnCombo;
     juce::ComboBox monitorCombo;
+    juce::ToggleButton monoModeToggle { "Mono device (single channel)" };
 
     // --- Measurement control ---
-    juce::TextButton measureButton { "Start Measurement" };
+    juce::TextButton measureButton  { "Start Measurement" };
+    juce::TextButton analyseButton  { "Analyze & Fit Model" };
 
     // --- Plan editor ---
     juce::Label      planLabel;
@@ -102,6 +116,13 @@ private:
     juce::ListBox    planList;
 
     // --- Status bar ---
+    juce::Label inputMeterLabel;
+
+    struct MeterTimer : juce::Timer {
+        MainComponent* owner;
+        void timerCallback() override;
+    } meterTimer;
+
     juce::Label statusLabel;
 
     // --- Data ---
