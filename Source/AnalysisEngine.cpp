@@ -71,7 +71,7 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
 
             // Store the tapered magnitude so the display curve matches the FIR.
             // Apply the same 85%–Nyquist half-cosine taper used inside designLinearPhaseFIR.
-            const int taperStart = (int) (0.85f * (float) (designBins - 1));
+            const int taperStart = (int) (0.80f * (float) (designBins - 1));
             const int taperEnd   = designBins - 1;
 
             for (int k = 0; k < designBins; ++k)
@@ -173,13 +173,26 @@ std::vector<float> AnalysisEngine::computeMagnitudeResponse (
     const int nativeBins = N / 2 + 1;
     std::vector<float> hMagNative (nativeBins);
 
+    // Compute reference magnitudes and find the peak for regularization.
+    // A log sine sweep has much lower energy near Nyquist than in the mid-band,
+    // so X_abs there can be tiny. Without a regularization floor, Y_abs/X_abs
+    // amplifies noise into a spurious HF boost.
+    // Regularization floor = 1% of peak reference magnitude (-40 dB relative).
+    std::vector<float> X_mags (nativeBins);
+    float X_peak = 0.0f;
     for (int k = 0; k < nativeBins; ++k)
     {
-        const float Xre = refData[2 * k],     Xim = refData[2 * k + 1];
-        const float Yre = recData[2 * k],     Yim = recData[2 * k + 1];
-        const float X_abs = std::sqrt (Xre * Xre + Xim * Xim);
+        const float Xre = refData[2 * k], Xim = refData[2 * k + 1];
+        X_mags[k] = std::sqrt (Xre * Xre + Xim * Xim);
+        X_peak = std::max (X_peak, X_mags[k]);
+    }
+    const float regFloor = 0.01f * X_peak;   // -40 dB relative to peak
+
+    for (int k = 0; k < nativeBins; ++k)
+    {
+        const float Yre = recData[2 * k], Yim = recData[2 * k + 1];
         const float Y_abs = std::sqrt (Yre * Yre + Yim * Yim);
-        hMagNative[k] = (X_abs > 1e-8f) ? Y_abs / X_abs : 1.0f;
+        hMagNative[k] = Y_abs / std::max (X_mags[k], regFloor);
     }
 
     // Resample to designBins via linear interpolation.
@@ -317,7 +330,7 @@ std::vector<float> AnalysisEngine::designLinearPhaseFIR (const std::vector<float
     // and in the FIR output.  The taper is relative to the design grid so it
     // always maps to 85–100% of the actual Nyquist regardless of sample rate.
     const int designBins = N / 2 + 1;
-    const int taperStart = (int) (0.85f * (float) (designBins - 1));
+    const int taperStart = (int) (0.80f * (float) (designBins - 1));
     const int taperEnd   = designBins - 1;
 
     std::vector<float> hTapered (hMag);
