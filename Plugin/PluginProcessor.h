@@ -91,5 +91,10 @@ private:
     float lpAlpha { 0.0f };
     std::vector<float> lpState;
 
+    // Weight tilt: one-pole LP at 800 Hz splits wet into LF/HF bands.
+    // weight=0.5 → flat; <0.5 → LF emphasis; >0.5 → HF emphasis.
+    float weightLpAlpha { 0.0f };
+    std::vector<float> weightLpState;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HardwareColorProcessor)
 };

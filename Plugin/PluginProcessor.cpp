@@ -26,11 +26,13 @@ HardwareColorProcessor::createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 10.0f, 0.01f, 0.5f),
         1.0f));
 
+    // Weight is a tilt EQ on the wet saturation path.
+    // 0.5 = flat (default); <0.5 = LF saturation emphasis; >0.5 = HF saturation emphasis.
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "weight", 1 },
         "Weight",
-        juce::NormalisableRange<float> (0.0f, 6.0f, 0.01f),
-        1.0f));
+        juce::NormalisableRange<float> (0.0f, 1.0f, 0.001f),
+        0.5f));
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "mix", 1 },
@@ -84,6 +86,11 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // Coefficient: α = exp(-2π * fc / sr)
     lpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 15000.0f / (float) sampleRate);
     lpState.assign (numCh, 0.0f);
+
+    // Weight tilt: one-pole LP at 800 Hz splits the wet signal into LF and HF
+    // bands. Weight 0.5 = flat; <0.5 blends toward LF; >0.5 blends toward HF.
+    weightLpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 800.0f / (float) sampleRate);
+    weightLpState.assign (numCh, 0.0f);
 }
 
 //==============================================================================
@@ -153,7 +160,7 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         {
             float x = data[n] * drive;
             x = juce::jlimit (-1.0f, 1.0f, x);
-            data[n] = applyWaveshaper (x) * makeupGain * weight;
+            data[n] = applyWaveshaper (x) * makeupGain;
         }
 
         // --- L1 FIR tone shaping applied post-saturation ---
@@ -175,6 +182,24 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             {
                 s      = (1.0f - lpAlpha) * data[n] + lpAlpha * s;
                 data[n] = s;
+            }
+        }
+
+        // --- Weight tilt EQ ---
+        // Splits the wet signal at 800 Hz into LF and HF bands, then blends:
+        //   weight=0.5 → flat (LF+HF = original)
+        //   weight<0.5 → LF saturation emphasis
+        //   weight>0.5 → HF saturation emphasis
+        // The ×2 factor ensures unity gain at weight=0.5.
+        if ((int) weightLpState.size() != numChannels)
+            weightLpState.assign (numChannels, 0.0f);
+        {
+            float& lpS = weightLpState[ch];
+            for (int n = 0; n < numSamples; ++n)
+            {
+                lpS = (1.0f - weightLpAlpha) * data[n] + weightLpAlpha * lpS;
+                const float hpWet = data[n] - lpS;
+                data[n] = 2.0f * ((1.0f - weight) * lpS + weight * hpWet);
             }
         }
 
@@ -343,6 +368,8 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
     // Rebuild overlap-save filter spectrum for the new FIR.
     // olsBlockSize is preserved from the last prepareToPlay call.
     setupOverlapSave (numCh, olsBlockSize);
+
+    weightLpState.assign (numCh, 0.0f);
 
     return {};
 }
