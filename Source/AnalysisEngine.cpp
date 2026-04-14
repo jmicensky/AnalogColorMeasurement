@@ -69,12 +69,21 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
 
             model.l1Fir = designLinearPhaseFIR (hMagAccum);
 
-            // Store every bin so the display curve reaches down to the first
-            // bin above 20 Hz (stride=4 skipped 0-47 Hz at 48 kHz).
+            // Store the tapered magnitude so the display curve matches the FIR.
+            // Apply the same 85%–Nyquist half-cosine taper used inside designLinearPhaseFIR.
+            const int taperStart = (int) (0.85f * (float) (designBins - 1));
+            const int taperEnd   = designBins - 1;
+
             for (int k = 0; k < designBins; ++k)
             {
+                float v = hMagAccum[k];
+                if (k >= taperStart)
+                {
+                    const float t = (float) (k - taperStart) / (float) (taperEnd - taperStart);
+                    v *= 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+                }
                 model.frFrequencies.push_back ((float) (k * detectedSR / kDesignN));
-                model.frMagnitudeDb.push_back (20.0f * std::log10 (std::max (hMagAccum[k], 1e-6f)));
+                model.frMagnitudeDb.push_back (20.0f * std::log10 (std::max (v, 1e-6f)));
             }
         }
         else
@@ -302,20 +311,37 @@ std::vector<float> AnalysisEngine::designLinearPhaseFIR (const std::vector<float
     const int N = kDesignN;
     juce::dsp::FFT fft (12);  // 2^12 = 4096
 
+    // Apply a half-cosine anti-aliasing taper from 85% of Nyquist to Nyquist.
+    // This suppresses near-Nyquist measurement noise (low SNR from recording chain
+    // roll-off) that would otherwise appear as a boost at 18–20 kHz on the display
+    // and in the FIR output.  The taper is relative to the design grid so it
+    // always maps to 85–100% of the actual Nyquist regardless of sample rate.
+    const int designBins = N / 2 + 1;
+    const int taperStart = (int) (0.85f * (float) (designBins - 1));
+    const int taperEnd   = designBins - 1;
+
+    std::vector<float> hTapered (hMag);
+    for (int k = taperStart; k <= taperEnd; ++k)
+    {
+        const float t = (float) (k - taperStart) / (float) (taperEnd - taperStart);
+        const float taper = 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+        hTapered[k] *= taper;
+    }
+
     std::vector<float> spectrum (2 * N, 0.0f);
 
     // DC
-    spectrum[0] = hMag[0];  spectrum[1] = 0.0f;
+    spectrum[0] = hTapered[0];  spectrum[1] = 0.0f;
 
     // Positive and mirrored negative frequencies (imaginary = 0 → zero phase).
     for (int k = 1; k < N / 2; ++k)
     {
-        spectrum[2 * k]           = hMag[k];  spectrum[2 * k + 1]           = 0.0f;
-        spectrum[2 * (N - k)]     = hMag[k];  spectrum[2 * (N - k) + 1]     = 0.0f;
+        spectrum[2 * k]           = hTapered[k];  spectrum[2 * k + 1]           = 0.0f;
+        spectrum[2 * (N - k)]     = hTapered[k];  spectrum[2 * (N - k) + 1]     = 0.0f;
     }
 
     // Nyquist
-    spectrum[N] = hMag[N / 2];  spectrum[N + 1] = 0.0f;
+    spectrum[N] = hTapered[N / 2];  spectrum[N + 1] = 0.0f;
 
     fft.performRealOnlyInverseTransform (spectrum.data());
 
