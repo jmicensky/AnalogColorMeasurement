@@ -49,16 +49,47 @@ public:
 private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
-    // Applies the L1 FIR to a single channel.
-    void applyFIR (float* data, int numSamples, std::vector<float>& history);
+    // Circular-buffer direct-form FIR — fallback when block size doesn't match.
+    void applyFIR (float* data, int numSamples, std::vector<float>& history, int& writePos);
+
+    // Overlap-save FFT convolution — used when block size matches olsBlockSize.
+    void applyFIR_OLS (float* data, int numSamples, std::vector<float>& overlap);
+
+    // Rebuilds overlap-save state (filter spectrum + overlap buffers).
+    // Called from prepareToPlay and loadArtifact.
+    void setupOverlapSave (int numChannels, int samplesPerBlock);
 
     // Table-lookup waveshaper with linear interpolation.
     float applyWaveshaper (float x) const;
 
     LNLModel model;
 
-    // Per-channel FIR delay-line histories (length = l1Fir.size() - 1).
+    // Playback sample rate, captured in prepareToPlay so loadArtifact can use it.
+    double currentSampleRate { 0.0 };
+
+    // Per-channel FIR circular delay-line histories (length = l1Fir.size() - 1).
     std::vector<std::vector<float>> firHistory;
+    std::vector<int>                firHistoryWritePos;   // circular write heads
+
+    // Overlap-save FFT convolution state.
+    // firSpectrum: precomputed FFT of the zero-padded FIR (2*olsN interleaved).
+    // olsOverlap:  per-channel save buffer of M-1 samples.
+    std::vector<float>              firSpectrum;
+    std::vector<std::vector<float>> olsOverlap;
+    std::unique_ptr<juce::dsp::FFT> olsFft;
+    int                             olsN         { 0 };  // FFT size
+    int                             olsOrder     { 0 };  // log2(olsN)
+    int                             olsBlockSize { 0 };  // expected block size B
+
+    // Dry signal delay line — delays dry by the FIR group delay so dry/wet
+    // mix is phase-coherent at all frequencies.
+    std::vector<std::vector<float>> dryDelayBuffer;
+    std::vector<int>                dryDelayWritePos;
+    int                             dryGroupDelay { 0 };
+
+    // One-pole LP at 15 kHz applied to the wet path.
+    float lpAlpha { 0.0f };
+    std::vector<float> lpState;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HardwareColorProcessor)
 };

@@ -14,7 +14,8 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
     model = LNLModel{};
     model.deviceName = deviceName;
     model.date       = juce::Time::getCurrentTime().toISO8601 (true);
-    double detectedSR = 44100.0;
+    double detectedSR = 44100.0;   // updated from WAV file headers below
+    bool   srDetected = false;
 
     // ---- 1.  Frequency response from SineSweep captures ----
     juce::Array<juce::File> sweepRefs;
@@ -37,6 +38,7 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
             continue;
 
         detectedSR = sampleRate;
+        srDetected = true;
 
         auto hMag = computeMagnitudeResponse (refBuf, recBuf, numSamples, sampleRate);
         jassert ((int) hMag.size() == designBins);
@@ -67,9 +69,9 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
 
             model.l1Fir = designLinearPhaseFIR (hMagAccum);
 
-            // Store downsampled FR for display (every 4th bin is plenty).
-            const int stride = 4;
-            for (int k = 0; k < designBins; k += stride)
+            // Store every bin so the display curve reaches down to the first
+            // bin above 20 Hz (stride=4 skipped 0-47 Hz at 48 kHz).
+            for (int k = 0; k < designBins; ++k)
             {
                 model.frFrequencies.push_back ((float) (k * detectedSR / kDesignN));
                 model.frMagnitudeDb.push_back (20.0f * std::log10 (std::max (hMagAccum[k], 1e-6f)));
@@ -80,8 +82,7 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
             // Bad sweep data — identity FIR, flat display curve.
             model.l1Fir = { 1.0f };
 
-            const int stride = 4;
-            for (int k = 0; k < designBins; k += stride)
+            for (int k = 0; k < designBins; ++k)
             {
                 model.frFrequencies.push_back ((float) (k * detectedSR / kDesignN));
                 model.frMagnitudeDb.push_back (0.0f);
@@ -116,7 +117,7 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
             if (! loadCapturePair (refFile, recFile, refBuf, recBuf, numSamples, sampleRate))
                 continue;
 
-            if (detectedSR == 44100.0) detectedSR = sampleRate;
+            if (! srDetected) { detectedSR = sampleRate; srDetected = true; }
 
             // Gain label is the name of the parent folder (e.g. "75%").
             const juce::String gainLabel = refFile.getParentDirectory().getFileName();
@@ -195,7 +196,23 @@ void AnalysisEngine::smoothMagnitude (std::vector<float>& hMag, double sampleRat
 {
     const int numBins = (int) hMag.size();
     std::vector<float> smoothed (numBins, 0.0f);
-    smoothed[0] = hMag[0];  // DC — leave as-is
+
+    // DC bin: the sine sweep has no DC energy so hMag[0] is the fallback value
+    // (1.0 before normalisation).  Using that hard-coded value creates a
+    // discontinuity in the spectrum when the transformer rolls off below ~30 Hz —
+    // the FIR then sees a step from 1.0 at DC to the measured roll-off value at
+    // the first measured bin, causing extra ringing that pushes the effective
+    // high-pass point higher than the transformer actually warrants.
+    // Fix: linearly extrapolate from the first two measured bins back to DC.
+    if (numBins > 2)
+    {
+        const float slope = hMag[2] - hMag[1];
+        smoothed[0] = std::max (0.01f, hMag[1] - slope);
+    }
+    else
+    {
+        smoothed[0] = (numBins > 1) ? hMag[1] : hMag[0];
+    }
 
     const float halfWidth = std::pow (2.0f, 1.0f / 6.0f);  // half an octave third
 
@@ -215,6 +232,63 @@ void AnalysisEngine::smoothMagnitude (std::vector<float>& hMag, double sampleRat
     }
 
     hMag = smoothed;
+}
+
+//==============================================================================
+// Rebuild the L1 FIR at a different sample rate using stored FR display data.
+// frFreqHz and frMagDb are the downsampled display arrays saved in LNLModel.
+//==============================================================================
+std::vector<float> AnalysisEngine::rebuildFirAtSampleRate (
+    const std::vector<float>& frFreqHz,
+    const std::vector<float>& frMagDb,
+    double targetSampleRate,
+    int numTaps)
+{
+    if (frFreqHz.empty() || frFreqHz.size() != frMagDb.size())
+        return { 1.0f };  // identity — no stored FR data
+
+    const int numStored = (int) frFreqHz.size();
+
+    // Convert stored dB values back to linear magnitude.
+    std::vector<float> storedLinear (numStored);
+    for (int i = 0; i < numStored; ++i)
+        storedLinear[i] = std::pow (10.0f, frMagDb[i] / 20.0f);
+
+    // Build a new design-grid magnitude array at targetSampleRate.
+    const int designBins = kDesignN / 2 + 1;
+    std::vector<float> hMag (designBins);
+
+    for (int k = 0; k < designBins; ++k)
+    {
+        const float freq = (float) (k * targetSampleRate / kDesignN);
+
+        if (freq <= frFreqHz[0])
+        {
+            hMag[k] = storedLinear[0];
+        }
+        else if (freq >= frFreqHz[numStored - 1])
+        {
+            // Beyond the measured range — hold the last value (typically Nyquist
+            // of the capture rate, which may be above the plugin's Nyquist).
+            hMag[k] = storedLinear[numStored - 1];
+        }
+        else
+        {
+            // Binary search for the enclosing interval.
+            int lo = 0, hi = numStored - 1;
+            while (hi - lo > 1)
+            {
+                const int mid = (lo + hi) / 2;
+                if (frFreqHz[mid] <= freq) lo = mid; else hi = mid;
+            }
+            const float t = (frFreqHz[hi] > frFreqHz[lo])
+                            ? (freq - frFreqHz[lo]) / (frFreqHz[hi] - frFreqHz[lo])
+                            : 0.0f;
+            hMag[k] = storedLinear[lo] * (1.0f - t) + storedLinear[hi] * t;
+        }
+    }
+
+    return designLinearPhaseFIR (hMag, numTaps);
 }
 
 //==============================================================================

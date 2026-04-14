@@ -1,15 +1,23 @@
 #include "AudioEngine.h"
+#include "LatencyAligner.h"
 
 AudioEngine::AudioEngine()
 {
     // Register built-in formats (WAV, AIFF) so AudioFormatManager can decode them.
     formatManager.registerBasicFormats();
 
+    // Load previously saved device settings (device name, sample rate, buffer size).
+    // If no settings file exists, nullptr causes JUCE to open the default device.
+    std::unique_ptr<juce::XmlElement> savedState;
+    const juce::File settingsFile = getSettingsFile();
+    if (settingsFile.existsAsFile())
+        savedState = juce::parseXML (settingsFile.loadFileAsString());
+
     // Initialise the device manager requesting up to 32 input and 32 output
     // channels so that all channels on a multi-channel interface are available
     // for routing. JUCE will open the system default device and clamp the
     // channel count to what the hardware actually supports.
-    auto result = deviceManager.initialise (32, 32, nullptr, true);
+    auto result = deviceManager.initialise (32, 32, savedState.get(), true);
 
     if (result.isNotEmpty())
         DBG ("AudioDeviceManager initialise error: " + result);
@@ -273,23 +281,29 @@ void AudioEngine::audioDeviceIOCallbackWithContext (
 }
 
 //==============================================================================
-void AudioEngine::trimRecBuffer (int lagSamples)
+void AudioEngine::trimRecBuffer (float lagSamples)
 {
-    if (lagSamples <= 0 || lagSamples >= capturePosition)
-        return;
+    const int intLag = (int) lagSamples;
+    const float fracLag = lagSamples - (float) intLag;
 
-    const int newLength = capturePosition - lagSamples;
-
-    for (int ch = 0; ch < recBuffer.getNumChannels(); ++ch)
+    // --- Integer trim ---
+    if (intLag > 0 && intLag < capturePosition)
     {
-        float* data = recBuffer.getWritePointer (ch);
-        // memmove handles the overlapping src/dest regions correctly.
-        std::memmove (data, data + lagSamples, sizeof (float) * (size_t) newLength);
+        const int newLength = capturePosition - intLag;
+
+        for (int ch = 0; ch < recBuffer.getNumChannels(); ++ch)
+        {
+            float* data = recBuffer.getWritePointer (ch);
+            std::memmove (data, data + intLag, sizeof (float) * (size_t) newLength);
+        }
+
+        capturePosition = newLength;
     }
 
-    // Reduce capturePosition so writeSession() writes the same length for
-    // both ref (trimmed from the end) and rec (trimmed from the start).
-    capturePosition = newLength;
+    // --- Sub-sample fractional correction ---
+    // Advances rec by fracLag samples using 4-point Lagrange interpolation so
+    // that the on-disk WAV is aligned to sub-sample precision.
+    LatencyAligner::applyFractionalDelay (recBuffer, capturePosition, fracLag);
 }
 
 //==============================================================================
@@ -342,4 +356,36 @@ juce::String AudioEngine::writeSession (const juce::File& refFilePath,
     }   // writer destroyed here → flushes + finalises WAV header
 
     return {};   // success
+}
+
+//==============================================================================
+juce::File AudioEngine::getSettingsFile()
+{
+    // ~/Library/Application Support/HardwareProfiler/audioSettings.xml
+    return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
+               .getChildFile ("Application Support")
+               .getChildFile ("HardwareProfiler")
+               .getChildFile ("audioSettings.xml");
+}
+
+void AudioEngine::saveDeviceSettings() const
+{
+    auto xml = deviceManager.createStateXml();
+    if (xml == nullptr) return;
+
+    const juce::File file = getSettingsFile();
+    file.getParentDirectory().createDirectory();
+    file.replaceWithText (xml->toString());
+}
+
+
+juce::String AudioEngine::getDeviceStatusString() const
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    if (device == nullptr)
+        return "No audio device";
+
+    const int sr = (int) device->getCurrentSampleRate();
+    const int bs = device->getCurrentBufferSizeSamples();
+    return device->getName() + "  |  " + juce::String (sr) + " Hz  |  " + juce::String (bs);
 }

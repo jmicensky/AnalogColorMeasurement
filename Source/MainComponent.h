@@ -4,6 +4,7 @@
 #include "LatencyAligner.h"
 #include "SessionWriter.h"
 #include "StimulusPlan.h"
+#include "SpectrumDisplay.h"
 
 class MainComponent : public juce::Component,
                       private juce::Timer
@@ -124,6 +125,9 @@ private:
     } meterTimer;
 
     juce::Label statusLabel;
+
+    // --- Spectrum display ---
+    SpectrumDisplay spectrumDisplay;
 
     // --- Data ---
     SessionWriter            sessionWriter;

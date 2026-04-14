@@ -16,6 +16,18 @@ public:
                                                const juce::String& deviceName,
                                                LNLModel& model);
 
+    // Rebuilds the L1 FIR at a target sample rate from stored frequency-response
+    // data (frFrequencies in Hz, frMagnitudeDb in dB).  Call from prepareToPlay
+    // whenever the DAW rate differs from the model's capture rate.
+    static std::vector<float> rebuildFirAtSampleRate (
+        const std::vector<float>& frFreqHz,
+        const std::vector<float>& frMagDb,
+        double targetSampleRate,
+        int numTaps = 128);
+
+    // FFT size used for FIR design — public so the plugin can reference it.
+    static constexpr int kDesignN = 4096;
+
 private:
     // --- Per-step analysis ---
     // Computes |H[k]| = |Rec[k]| / |Ref[k]| from one capture pair.
@@ -31,7 +43,7 @@ private:
     // magnitude array (kDesignN/2 + 1 entries).
     static std::vector<float> designLinearPhaseFIR (
         const std::vector<float>& hMag,
-        int numTaps = 512);
+        int numTaps = 128);
 
     // 1/3-octave smoothing of a half-spectrum magnitude array.
     static void smoothMagnitude (std::vector<float>& hMag, double sampleRate);
@@ -59,7 +71,6 @@ private:
                                   double& sampleRate);
 
     // --- Constants ---
-    static constexpr int kDesignN   = 4096;  // FFT size for FIR design
     static constexpr int kTableSize = 1024;  // waveshaper table entries
 
     // --- Waveshaper accumulator (reset before each project analysis) ---

@@ -146,10 +146,11 @@ MainComponent::MainComponent()
     planList.setRowHeight (22);
     addAndMakeVisible (planList);
 
+    // --- Spectrum display ---
+    addAndMakeVisible (spectrumDisplay);
+
     // --- Status bar ---
-    auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
-    juce::String deviceName = device ? device->getName() : "No audio device";
-    statusLabel.setText ("Device: " + deviceName + "  |  No project initialized.",
+    statusLabel.setText (audioEngine.getDeviceStatusString() + "  |  No project initialized.",
                          juce::dontSendNotification);
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
@@ -422,10 +423,9 @@ void MainComponent::onAnalyseClicked()
         return;
     }
 
-    model.sampleRate = [this]() -> double {
-        auto* dev = audioEngine.getDeviceManager().getCurrentAudioDevice();
-        return dev ? dev->getCurrentSampleRate() : 44100.0;
-    }();
+    // model.sampleRate is set by AnalysisEngine from the WAV file headers —
+    // do not overwrite it with the device's current rate here, which may differ
+    // if the user changed the device between capture and analysis.
 
     const juce::File artifactFile = sessionWriter.getProjectFolder()
         .getChildFile (sessionWriter.getProjectName() + "_model.json");
@@ -436,6 +436,8 @@ void MainComponent::onAnalyseClicked()
         statusLabel.setText ("ERROR saving artifact: " + saveErr, juce::dontSendNotification);
         return;
     }
+
+    spectrumDisplay.setData (model.frFrequencies, model.frMagnitudeDb);
 
     juce::String summary = "Model saved: " + artifactFile.getFileName()
         + "  |  THD entries: " + juce::String ((int) model.thdResults.size())
@@ -469,10 +471,10 @@ void MainComponent::onAudioSettingsClicked()
         dialog,
         juce::ModalCallbackFunction::create ([this] (int)
         {
+            audioEngine.saveDeviceSettings();
             populateRoutingCombos();
-            auto* device = audioEngine.getDeviceManager().getCurrentAudioDevice();
-            juce::String deviceName = device ? device->getName() : "No audio device";
-            statusLabel.setText ("Device: " + deviceName, juce::dontSendNotification);
+            statusLabel.setText (audioEngine.getDeviceStatusString(),
+                                 juce::dontSendNotification);
         }));
 }
 
@@ -511,7 +513,7 @@ void MainComponent::timerCallback()
         auto refPath = sessionWriter.getStepRefFilePath (step);
         auto recPath = sessionWriter.getStepRecFilePath (step);
 
-        const int lag = LatencyAligner::findLatencySamples (
+        const float lag = LatencyAligner::findLatencySamples (
             audioEngine.getReferenceBuffer(),
             audioEngine.getRecordBuffer(),
             audioEngine.getCapturePosition(),
@@ -561,7 +563,7 @@ void MainComponent::timerCallback()
                                   ? -1
                                   : (monitorCombo.getSelectedId() - 2) * 2;
 
-        sessionWriter.writeSessionJson (stimulusPlan.getSteps(), sr, sendCh, returnCh, monitorCh, lag);
+        sessionWriter.writeSessionJson (stimulusPlan.getSteps(), sr, sendCh, returnCh, monitorCh, (int) lag);
         sessionWriter.writeMarkersJson (markers);
 
         if (stimulusPlan.isComplete())
@@ -588,7 +590,7 @@ void MainComponent::timerCallback()
     }
 
     // --- Legacy single-capture path (no plan active) ---
-    const int lag = LatencyAligner::findLatencySamples (
+    const float lag = LatencyAligner::findLatencySamples (
         audioEngine.getReferenceBuffer(),
         audioEngine.getRecordBuffer(),
         audioEngine.getCapturePosition(),
@@ -858,14 +860,23 @@ void MainComponent::resized()
     analyseButton.setBounds (margin + 210, y, 180, rowH);
     y += rowH + margin + 8;
 
-    // --- Plan editor ---
+    // Left column width: controls fit within ~460 px, leave right for spectrum.
+    const int splitX   = 470;
+    const int rightX   = splitX + margin;
+    const int rightW   = getWidth() - rightX - margin;
+    const int bottomY  = getHeight() - 40;
+
+    // --- Plan editor (left column) ---
     planLabel.setBounds (margin, y, 200, 20);
     y += 24;
     gainLabelsLabel .setBounds (margin,                y, labelW, rowH);
     gainLabelsEditor.setBounds (margin + labelW,       y, 260,    rowH);
     buildPlanButton .setBounds (margin + labelW + 268, y, 110,    rowH);
     y += rowH + 8;
-    planList.setBounds (margin, y, getWidth() - margin * 2, getHeight() - y - 40);
+    planList.setBounds (margin, y, splitX - margin * 2, bottomY - y);
+
+    // --- Spectrum display (right column) ---
+    spectrumDisplay.setBounds (rightX, 8, rightW, bottomY - 8);
 
     // --- Status bar ---
     statusLabel.setBounds (margin, getHeight() - 28, getWidth() - margin * 2, 24);

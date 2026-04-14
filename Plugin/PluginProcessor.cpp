@@ -1,6 +1,7 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "../Source/ArtifactFile.h"
+#include "../Source/AnalysisEngine.h"
 
 //==============================================================================
 HardwareColorProcessor::HardwareColorProcessor()
@@ -16,10 +17,13 @@ HardwareColorProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
+    // Logarithmic skew (0.5) maps the knob's 50% position to Drive = 1.0 (unity).
+    // The upper half of the knob then covers 1.0–4.0 for heavy saturation,
+    // giving fine control in the subtle range without sacrificing headroom.
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "drive", 1 },
         "Drive",
-        juce::NormalisableRange<float> (0.0f, 10.0f, 0.01f),
+        juce::NormalisableRange<float> (0.0f, 4.0f, 0.01f, 0.5f),
         1.0f));
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
@@ -34,17 +38,52 @@ HardwareColorProcessor::createParameterLayout()
         juce::NormalisableRange<float> (0.0f, 1.0f, 0.01f),
         1.0f));
 
+    params.push_back (std::make_unique<juce::AudioParameterFloat> (
+        juce::ParameterID { "outputGain", 1 },
+        "Output",
+        juce::NormalisableRange<float> (-24.0f, 12.0f, 0.1f),
+        0.0f));
+
     return { params.begin(), params.end() };
 }
 
 //==============================================================================
-void HardwareColorProcessor::prepareToPlay (double /*sampleRate*/, int /*samplesPerBlock*/)
+void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Re-allocate FIR history buffers when model changes or playback restarts.
-    const int numCh  = getTotalNumInputChannels();
-    const int histLen = model.l1Fir.empty() ? 0 : (int) model.l1Fir.size() - 1;
+    currentSampleRate = sampleRate;
 
+    // If the DAW sample rate differs from the model's capture rate, the FIR tap
+    // values are misaligned — all frequencies shift by captureRate/playbackRate.
+    // Redesign the FIR from the stored frequency-response data at the actual rate.
+    if (model.isValid()
+        && ! model.frFrequencies.empty()
+        && std::abs (sampleRate - model.sampleRate) > 1.0)
+    {
+        model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
+                          model.frFrequencies, model.frMagnitudeDb, sampleRate);
+    }
+
+    const int numCh   = getTotalNumInputChannels();
+    const int histLen = model.l1Fir.empty() ? 0 : (int) model.l1Fir.size() - 1;
     firHistory.assign (numCh, std::vector<float> (histLen, 0.0f));
+    firHistoryWritePos.assign (numCh, 0);
+
+    // Dry delay line: compensates the FIR's group delay so dry/wet mix is
+    // phase-coherent.  Group delay of a linear-phase FIR = (taps - 1) / 2.
+    dryGroupDelay = model.l1Fir.empty() ? 0 : ((int) model.l1Fir.size() - 1) / 2;
+    const int dlyLen = std::max (1, dryGroupDelay);
+    dryDelayBuffer.assign (numCh, std::vector<float> (dlyLen, 0.0f));
+    dryDelayWritePos.assign (numCh, 0);
+
+    setLatencySamples (dryGroupDelay);
+
+    // Overlap-save FFT convolution setup.
+    setupOverlapSave (numCh, samplesPerBlock);
+
+    // One-pole LP at 15 kHz applied to the wet path to tame transient peaks.
+    // Coefficient: α = exp(-2π * fc / sr)
+    lpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 15000.0f / (float) sampleRate);
+    lpState.assign (numCh, 0.0f);
 }
 
 //==============================================================================
@@ -56,68 +95,127 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     if (! model.isValid())
         return;
 
-    const float drive  = *apvts.getRawParameterValue ("drive");
-    const float weight = *apvts.getRawParameterValue ("weight");
-    const float mix    = *apvts.getRawParameterValue ("mix");
+    const float drive      = *apvts.getRawParameterValue ("drive");
+    const float weight     = *apvts.getRawParameterValue ("weight");
+    const float mix        = *apvts.getRawParameterValue ("mix");
+    const float outputGain = juce::Decibels::decibelsToGain (
+                                 apvts.getRawParameterValue ("outputGain")->load());
 
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
 
-    // Ensure history is sized correctly (e.g. after a model load).
+    // Ensure histories are sized correctly (e.g. after a model load).
     const int histLen = model.l1Fir.empty() ? 0 : (int) model.l1Fir.size() - 1;
     if ((int) firHistory.size() != numChannels)
+    {
         firHistory.assign (numChannels, std::vector<float> (histLen, 0.0f));
+        firHistoryWritePos.assign (numChannels, 0);
+    }
+    if ((int) dryDelayBuffer.size() != numChannels)
+    {
+        const int dlyLen = std::max (1, dryGroupDelay);
+        dryDelayBuffer.assign (numChannels, std::vector<float> (dlyLen, 0.0f));
+        dryDelayWritePos.assign (numChannels, 0);
+    }
 
     for (int ch = 0; ch < numChannels; ++ch)
     {
         float* data = buffer.getWritePointer (ch);
 
-        // Store dry signal for mix.
-        std::vector<float> dry (data, data + numSamples);
+        // Push current samples into the dry delay line and read out the
+        // phase-aligned dry (delayed by the FIR group delay).
+        std::vector<float> dry (numSamples);
+        if (dryGroupDelay > 0)
+        {
+            auto& dlBuf = dryDelayBuffer[ch];
+            int&  dlPos = dryDelayWritePos[ch];
+            const int dlLen = (int) dlBuf.size();
+            for (int n = 0; n < numSamples; ++n)
+            {
+                dry[n]       = dlBuf[dlPos];   // oldest sample = delayed dry
+                dlBuf[dlPos] = data[n];        // overwrite with current
+                dlPos = (dlPos + 1) % dlLen;
+            }
+        }
+        else
+        {
+            std::copy (data, data + numSamples, dry.begin());
+        }
 
         // --- N: drive + waveshaper ---
+        // Makeup gain keeps output level consistent as Drive changes — Drive then
+        // controls only how hard the signal hits the saturation curve, not the
+        // overall amplitude.  Clamped at 0.25 (4× max boost) so near-zero Drive
+        // fades gracefully rather than amplifying noise to extremes.
+        const float makeupGain = 1.0f / std::max (drive, 0.25f);
+
         for (int n = 0; n < numSamples; ++n)
         {
             float x = data[n] * drive;
             x = juce::jlimit (-1.0f, 1.0f, x);
-            data[n] = applyWaveshaper (x) * weight;
+            data[n] = applyWaveshaper (x) * makeupGain * weight;
         }
 
-        // --- L2: FIR tone shaping applied post-saturation ---
-        // Applied after the waveshaper so it shapes the distorted output rather
-        // than pre-filtering the input (which would make the sound thin).
+        // --- L1 FIR tone shaping applied post-saturation ---
+        // Use overlap-save FFT convolution when the block size matches the
+        // pre-computed FFT size; otherwise fall back to the circular-buffer
+        // direct-form (e.g. variable-block-size hosts).
         if (! model.l1Fir.empty())
-            applyFIR (data, numSamples, firHistory[ch]);
+        {
+            if (olsN > 0 && numSamples == olsBlockSize && ch < (int) olsOverlap.size())
+                applyFIR_OLS (data, numSamples, olsOverlap[ch]);
+            else
+                applyFIR (data, numSamples, firHistory[ch], firHistoryWritePos[ch]);
+        }
+
+        // --- LP at 15 kHz: tame transient peaks on the wet path ---
+        {
+            float& s = lpState[ch];
+            for (int n = 0; n < numSamples; ++n)
+            {
+                s      = (1.0f - lpAlpha) * data[n] + lpAlpha * s;
+                data[n] = s;
+            }
+        }
 
         // --- Mix dry/wet ---
-        if (mix < 1.0f)
-        {
-            for (int n = 0; n < numSamples; ++n)
-                data[n] = dry[n] * (1.0f - mix) + data[n] * mix;
-        }
+        for (int n = 0; n < numSamples; ++n)
+            data[n] = dry[n] * (1.0f - mix) + data[n] * mix;
+
+        // --- Output gain ---
+        if (outputGain != 1.0f)
+            juce::FloatVectorOperations::multiply (data, outputGain, numSamples);
     }
 }
 
 //==============================================================================
 void HardwareColorProcessor::applyFIR (float* data, int numSamples,
-                                        std::vector<float>& history)
+                                        std::vector<float>& history,
+                                        int& writePos)
 {
     const auto& coeffs = model.l1Fir;
     const int   order  = (int) coeffs.size();
+    const int   hLen   = (int) history.size();  // = order - 1
 
     if (order == 0) return;
 
     for (int n = 0; n < numSamples; ++n)
     {
-        // Shift history left and insert new sample.
-        for (int k = (int) history.size() - 1; k > 0; --k)
-            history[k] = history[k - 1];
-        if (! history.empty()) history[0] = data[n];
+        // Write new sample into the circular history buffer.
+        // history holds the past (order-1) input samples.
+        if (hLen > 0)
+        {
+            history[writePos] = data[n];
+            writePos = (writePos + 1) % hLen;
+        }
 
-        // Convolve: y[n] = sum h[k] * x[n-k]
+        // Convolve: y[n] = h[0]*x[n] + h[1]*x[n-1] + ... using circular reads.
         float y = coeffs[0] * data[n];
-        for (int k = 1; k < order && k - 1 < (int) history.size(); ++k)
-            y += coeffs[k] * history[k - 1];
+        for (int k = 1; k < order; ++k)
+        {
+            const int idx = (writePos - k + hLen) % hLen;
+            y += coeffs[k] * history[idx];
+        }
 
         data[n] = y;
     }
@@ -138,6 +236,79 @@ float HardwareColorProcessor::applyWaveshaper (float x) const
 }
 
 //==============================================================================
+void HardwareColorProcessor::setupOverlapSave (int numChannels, int samplesPerBlock)
+{
+    olsBlockSize = samplesPerBlock;
+
+    if (model.l1Fir.empty() || samplesPerBlock <= 0)
+    {
+        olsN = 0;
+        olsFft.reset();
+        firSpectrum.clear();
+        olsOverlap.clear();
+        return;
+    }
+
+    const int M = (int) model.l1Fir.size();
+
+    // N = next power of 2 >= B + M - 1.
+    int ord = 1;
+    while ((1 << ord) < samplesPerBlock + M - 1)
+        ++ord;
+
+    olsOrder = ord;
+    olsN     = 1 << ord;
+    olsFft   = std::make_unique<juce::dsp::FFT> (ord);
+
+    // Precompute FFT of zero-padded FIR.  Stored in JUCE's interleaved [re,im] layout.
+    firSpectrum.assign (2 * olsN, 0.0f);
+    for (int k = 0; k < M; ++k)
+        firSpectrum[k] = model.l1Fir[k];
+    olsFft->performRealOnlyForwardTransform (firSpectrum.data());
+
+    // Per-channel overlap save buffers (M-1 zeros on init / model load).
+    olsOverlap.assign (numChannels, std::vector<float> (M - 1, 0.0f));
+}
+
+//==============================================================================
+void HardwareColorProcessor::applyFIR_OLS (float* data, int numSamples,
+                                            std::vector<float>& overlap)
+{
+    const int M   = (int) model.l1Fir.size();
+    const int ovL = M - 1;    // overlap length
+
+    // Build the N-sample input segment: [overlap | new_input] zero-padded to olsN.
+    std::vector<float> seg (2 * olsN, 0.0f);
+    for (int k = 0; k < ovL; ++k)
+        seg[k] = overlap[k];
+    for (int k = 0; k < numSamples; ++k)
+        seg[ovL + k] = data[k];
+
+    // Save the last M-1 input samples as the new overlap for the next block.
+    for (int k = 0; k < ovL; ++k)
+        overlap[k] = data[numSamples - ovL + k >= 0 ? numSamples - ovL + k : 0];
+
+    // Forward FFT of the input segment.
+    olsFft->performRealOnlyForwardTransform (seg.data());
+
+    // Pointwise complex multiply with the precomputed filter spectrum.
+    for (int k = 0; k < olsN; ++k)
+    {
+        const float re_x = seg[2 * k],         im_x = seg[2 * k + 1];
+        const float re_h = firSpectrum[2 * k],  im_h = firSpectrum[2 * k + 1];
+        seg[2 * k]     = re_x * re_h - im_x * im_h;
+        seg[2 * k + 1] = re_x * im_h + im_x * re_h;
+    }
+
+    // Inverse FFT — JUCE normalises by 1/N internally.
+    olsFft->performRealOnlyInverseTransform (seg.data());
+
+    // Discard the first M-1 samples (circular aliasing); copy B valid samples out.
+    for (int n = 0; n < numSamples; ++n)
+        data[n] = seg[ovL + n];
+}
+
+//==============================================================================
 juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
 {
     LNLModel newModel;
@@ -146,10 +317,32 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
 
     model = std::move (newModel);
 
-    // Reset FIR histories for all channels.
-    const int numCh  = getTotalNumInputChannels();
+    // If prepareToPlay has already run and its rate differs from the model's
+    // capture rate, rebuild the FIR at the playback rate immediately.
+    if (currentSampleRate > 0.0
+        && ! model.frFrequencies.empty()
+        && std::abs (currentSampleRate - model.sampleRate) > 1.0)
+    {
+        model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
+                          model.frFrequencies, model.frMagnitudeDb, currentSampleRate);
+    }
+
+    // Reset FIR and dry-delay histories for all channels.
+    const int numCh   = getTotalNumInputChannels();
     const int histLen = model.l1Fir.empty() ? 0 : (int) model.l1Fir.size() - 1;
     firHistory.assign (numCh, std::vector<float> (histLen, 0.0f));
+    firHistoryWritePos.assign (numCh, 0);
+
+    dryGroupDelay = model.l1Fir.empty() ? 0 : ((int) model.l1Fir.size() - 1) / 2;
+    const int dlyLen = std::max (1, dryGroupDelay);
+    dryDelayBuffer.assign (numCh, std::vector<float> (dlyLen, 0.0f));
+    dryDelayWritePos.assign (numCh, 0);
+
+    setLatencySamples (dryGroupDelay);
+
+    // Rebuild overlap-save filter spectrum for the new FIR.
+    // olsBlockSize is preserved from the last prepareToPlay call.
+    setupOverlapSave (numCh, olsBlockSize);
 
     return {};
 }

@@ -52,13 +52,22 @@ public:
     int   getCapturePosition() const { return capturePosition; }
     float getSampleRate()      const { return sampleRate; }
 
-    // Shifts rec data left by lagSamples and reduces capturePosition so that
-    // the next writeSession() call saves aligned ref and rec wavs.
-    void trimRecBuffer (int lagSamples);
+    // Integer-trims rec by floor(lagSamples) and then applies a sub-sample
+    // fractional advance (via LatencyAligner::applyFractionalDelay) for the
+    // remaining frac(lagSamples) portion.  Pass the float returned by
+    // LatencyAligner::findLatencySamples directly.
+    void trimRecBuffer (float lagSamples);
 
     // Current peak level (dBFS) of the configured return channel.
     // Updated continuously by the audio callback — safe to call from any thread.
     float getReturnPeakDb() const;
+
+    // Persist audio device settings (device, sample rate, buffer size).
+    // Call after the user closes the audio settings dialog.
+    void saveDeviceSettings() const;
+
+    // Returns a human-readable "Name  |  48000 Hz  |  512" string for the status bar.
+    juce::String getDeviceStatusString() const;
 
 private:
     // --- AudioIODeviceCallback ---
@@ -101,6 +110,9 @@ private:
     std::atomic<int>   monitorChannel { -1 };   // -1 = not set
     std::atomic<int>   returnChannel  { 0 };
     std::atomic<float> returnPeakLinear { 0.0f };
+
+    // Returns ~/Library/Application Support/HardwareProfiler/audioSettings.xml
+    static juce::File getSettingsFile();
 
     // --- Audio-thread-only state ---
     float sampleRate { 44100.0f };

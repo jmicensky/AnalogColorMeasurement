@@ -29,6 +29,7 @@ target_sources(HardwareProfiler PRIVATE
     Source/SignalGenerator.cpp
     Source/AnalysisEngine.cpp
     Source/ArtifactFile.cpp
+    Source/SpectrumDisplay.cpp
 )
 
 target_link_libraries(HardwareProfiler PRIVATE
@@ -75,6 +76,7 @@ target_sources(HardwareColor PRIVATE
     Plugin/PluginEditor.cpp
     Source/AnalysisEngine.cpp
     Source/ArtifactFile.cpp
+    Source/SpectrumDisplay.cpp
 )
 
 target_include_directories(HardwareColor PRIVATE Source)

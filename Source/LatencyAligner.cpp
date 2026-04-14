@@ -1,6 +1,6 @@
 #include "LatencyAligner.h"
 
-int LatencyAligner::findLatencySamples (const juce::AudioBuffer<float>& ref,
+float LatencyAligner::findLatencySamples (const juce::AudioBuffer<float>& ref,
                                          const juce::AudioBuffer<float>& rec,
                                          int   numCapturedSamples,
                                          float sampleRate)
@@ -99,7 +99,58 @@ int LatencyAligner::findLatencySamples (const juce::AudioBuffer<float>& ref,
     // A negative result (rec leads ref) is physically unexpected for a
     // hardware loopback path — return 0 so we don't trim the wrong end.
     if (peakIdx < 0)
-        return 0;
+        return 0.0f;
 
-    return peakIdx;
+    // --- Parabolic interpolation for sub-sample precision (eq. 11) ---
+    // Fit a parabola through c[p-1], c[p], c[p+1] and find its true peak.
+    float fracOffset = 0.0f;
+    if (peakIdx > 0 && peakIdx < fftSize - 1)
+    {
+        const float cm1 = xcorrFreq[peakIdx - 1];
+        const float c0  = xcorrFreq[peakIdx];
+        const float cp1 = xcorrFreq[peakIdx + 1];
+        const float denom = cm1 - 2.0f * c0 + cp1;
+        if (std::abs (denom) > 1e-10f)
+            fracOffset = 0.5f * (cm1 - cp1) / denom;
+
+        // Clamp to ±0.5 sample (result outside this range means bad parabola fit).
+        fracOffset = juce::jlimit (-0.5f, 0.5f, fracOffset);
+    }
+
+    return (float) peakIdx + fracOffset;
+}
+
+//==============================================================================
+void LatencyAligner::applyFractionalDelay (juce::AudioBuffer<float>& buf,
+                                            int numSamples,
+                                            float fracDelay)
+{
+    if (fracDelay < 0.001f) return;   // negligible — skip
+
+    // 4-point Lagrange interpolation: output[n] = buf[n + fracDelay]
+    // Uses nodes at offsets 0, 1, 2, 3 relative to n, giving exactly
+    // fracDelay samples of advance with no additional integer-sample shift.
+    const float d  = fracDelay;
+    const float L0 = (d - 1.0f) * (d - 2.0f) * (d - 3.0f) / (-6.0f);
+    const float L1 = d           * (d - 2.0f) * (d - 3.0f) / ( 2.0f);
+    const float L2 = d           * (d - 1.0f) * (d - 3.0f) / (-2.0f);
+    const float L3 = d           * (d - 1.0f) * (d - 2.0f) / ( 6.0f);
+
+    for (int ch = 0; ch < buf.getNumChannels(); ++ch)
+    {
+        float* data = buf.getWritePointer (ch);
+
+        // Process in a temporary buffer to avoid read-after-write artefacts.
+        std::vector<float> out (numSamples);
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const float s0 = data[n];
+            const float s1 = (n + 1 < numSamples) ? data[n + 1] : 0.0f;
+            const float s2 = (n + 2 < numSamples) ? data[n + 2] : 0.0f;
+            const float s3 = (n + 3 < numSamples) ? data[n + 3] : 0.0f;
+            out[n] = L0 * s0 + L1 * s1 + L2 * s2 + L3 * s3;
+        }
+
+        std::copy (out.begin(), out.end(), data);
+    }
 }

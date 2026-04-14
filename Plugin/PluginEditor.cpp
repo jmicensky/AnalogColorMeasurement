@@ -4,21 +4,23 @@ HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
     : AudioProcessorEditor (&p), processor (p)
 {
     // --- Knobs ---
-    for (auto* s : { &driveSlider, &weightSlider, &mixSlider })
+    for (auto* s : { &driveSlider, &weightSlider, &mixSlider, &outputGainSlider })
         addAndMakeVisible (s);
 
-    for (auto* l : { &driveLabel, &weightLabel, &mixLabel })
+    for (auto* l : { &driveLabel, &weightLabel, &mixLabel, &outputGainLabel })
     {
         l->setJustificationType (juce::Justification::centred);
         addAndMakeVisible (l);
     }
 
-    driveAttach  = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-        processor.apvts, "drive",  driveSlider);
-    weightAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-        processor.apvts, "weight", weightSlider);
-    mixAttach    = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
-        processor.apvts, "mix",    mixSlider);
+    driveAttach      = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor.apvts, "drive",       driveSlider);
+    weightAttach     = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor.apvts, "weight",      weightSlider);
+    mixAttach        = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor.apvts, "mix",         mixSlider);
+    outputGainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
+        processor.apvts, "outputGain",  outputGainSlider);
 
     // --- Artifact loader ---
     loadButton.addListener (this);
@@ -28,9 +30,12 @@ HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
     modelLabel.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
     addAndMakeVisible (modelLabel);
 
+    // --- Spectrum display ---
+    addAndMakeVisible (spectrumDisplay);
+
     updateModelLabel();
 
-    setSize (400, 300);
+    setSize (500, 460);
 }
 
 HardwareColorEditor::~HardwareColorEditor()
@@ -72,10 +77,12 @@ void HardwareColorEditor::updateModelLabel()
                             + "  |  " + juce::String (m.sampleRate / 1000.0, 1) + " kHz"
                             + "  |  " + juce::String ((int) m.thdResults.size()) + " THD pts",
                             juce::dontSendNotification);
+        spectrumDisplay.setData (m.frFrequencies, m.frMagnitudeDb);
     }
     else
     {
         modelLabel.setText ("No model loaded.", juce::dontSendNotification);
+        spectrumDisplay.setData ({}, {});
     }
 }
 
@@ -97,7 +104,7 @@ void HardwareColorEditor::resized()
     const int knobH   = 100;
     const int labelH  = 20;
     const int btnH    = 28;
-    const int totalKnobsW = knobW * 3 + margin * 2;
+    const int totalKnobsW = knobW * 4 + margin * 3;
     const int knobStartX  = (getWidth() - totalKnobsW) / 2;
 
     // Title row: top 36 px (painted, not a component).
@@ -106,9 +113,10 @@ void HardwareColorEditor::resized()
     // Knobs row.
     for (auto [slider, label, col] :
          std::initializer_list<std::tuple<juce::Slider*, juce::Label*, int>>
-         { { &driveSlider,  &driveLabel,  0 },
-           { &weightSlider, &weightLabel, 1 },
-           { &mixSlider,    &mixLabel,    2 } })
+         { { &driveSlider,      &driveLabel,      0 },
+           { &weightSlider,     &weightLabel,     1 },
+           { &mixSlider,        &mixLabel,        2 },
+           { &outputGainSlider, &outputGainLabel, 3 } })
     {
         const int x = knobStartX + col * (knobW + margin);
         slider->setBounds (x, y,          knobW, knobH);
@@ -119,4 +127,8 @@ void HardwareColorEditor::resized()
     // Load button + model label.
     loadButton .setBounds (margin, y, 120, btnH);
     modelLabel .setBounds (margin + 128, y, getWidth() - margin * 2 - 128, btnH);
+    y += btnH + margin;
+
+    // Spectrum display.
+    spectrumDisplay.setBounds (margin, y, getWidth() - margin * 2, getHeight() - y - margin);
 }
