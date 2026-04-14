@@ -4,7 +4,7 @@
 // Reusable frequency-response display.
 // Call setData() to update the curve; the component repaints itself.
 // X-axis: log scale 20 Hz – 20 kHz.
-// Y-axis: -24 dB – +12 dB.
+// Y-axis: -8 dB – +6 dB.
 class SpectrumDisplay : public juce::Component
 {
 public:
@@ -29,8 +29,8 @@ private:
 
     static constexpr float kMinFreq  =   20.0f;
     static constexpr float kMaxFreq  = 20000.0f;
-    static constexpr float kMinDb    =  -24.0f;
-    static constexpr float kMaxDb    =   12.0f;
+    static constexpr float kMinDb    =  -8.0f;
+    static constexpr float kMaxDb    =   6.0f;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (SpectrumDisplay)
 };

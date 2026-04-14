@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(HardwareProfiler VERSION 1.0.0)
+project(HardwareProfiler VERSION 1.1.0)
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -10,7 +10,7 @@ add_subdirectory(JUCE)
 # =============================================================================
 juce_add_gui_app(HardwareProfiler
     PRODUCT_NAME "Hardware Profiler"
-    VERSION "1.0.0"
+    VERSION "1.1.0"
     PLIST_TO_MERGE "<plist version=\"1.0\"><dict><key>NSMicrophoneUsageDescription</key><string>Hardware Profiler needs microphone access to record audio from your interface.</string></dict></plist>")
 
 juce_add_binary_data(HardwareProfilerData SOURCES
@@ -30,6 +30,7 @@ target_sources(HardwareProfiler PRIVATE
     Source/AnalysisEngine.cpp
     Source/ArtifactFile.cpp
     Source/SpectrumDisplay.cpp
+    Source/LevelMeter.cpp
 )
 
 target_link_libraries(HardwareProfiler PRIVATE
@@ -58,7 +59,7 @@ target_compile_definitions(HardwareProfiler PRIVATE
 # =============================================================================
 juce_add_plugin(HardwareColor
     PRODUCT_NAME     "Hardware Color"
-    VERSION          "1.1.2"
+    VERSION          "1.2.0"
     PLUGIN_MANUFACTURER_CODE Jmce
     PLUGIN_CODE      HdCl
     FORMATS          VST3 AU

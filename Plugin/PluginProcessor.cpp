@@ -81,10 +81,12 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // Overlap-save FFT convolution setup.
     setupOverlapSave (numCh, samplesPerBlock);
 
-    // Weight tilt: one-pole LP at 800 Hz splits the wet signal into LF and HF
-    // bands. Weight 0.5 = flat; <0.5 blends toward LF; >0.5 blends toward HF.
+    // Weight EQ setup.
+    // Right of centre: one-pole high shelf at 800 Hz (brighter).
+    // Left  of centre: biquad low shelf at  80 Hz (richer/warmer, Pultec-style).
     weightLpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 800.0f / (float) sampleRate);
     weightLpState.assign (numCh, 0.0f);
+    lowShelfState.assign (numCh, {});
 }
 
 //==============================================================================
@@ -104,6 +106,10 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
+
+    // Pre-compute interpolated waveshaper for multi-model (once per block).
+    if (model.isMultiModel())
+        updateBlendedWaveshaper (drive);
 
     // Ensure histories are sized correctly (e.g. after a model load).
     const int histLen = model.l1Fir.empty() ? 0 : (int) model.l1Fir.size() - 1;
@@ -143,18 +149,27 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             std::copy (data, data + numSamples, dry.begin());
         }
 
-        // --- N: drive + waveshaper ---
-        // Makeup gain keeps output level consistent as Drive changes — Drive then
-        // controls only how hard the signal hits the saturation curve, not the
-        // overall amplitude.  Clamped at 0.25 (4× max boost) so near-zero Drive
-        // fades gracefully rather than amplifying noise to extremes.
-        const float makeupGain = 1.0f / std::max (drive, 0.25f);
-
-        for (int n = 0; n < numSamples; ++n)
+        // --- N: waveshaper ---
+        if (model.isMultiModel())
         {
-            float x = data[n] * drive;
-            x = juce::jlimit (-1.0f, 1.0f, x);
-            data[n] = applyWaveshaper (x) * makeupGain;
+            // Drive selects which captured gain-level model to use (0 = lightest,
+            // 10 = heaviest).  The blended table is recomputed once per block above
+            // the channel loop.  No amplitude pre-scaling: the waveshaper at each
+            // gain position already encodes the correct hardware transfer curve.
+            for (int n = 0; n < numSamples; ++n)
+                data[n] = applyWaveshaperTable (data[n], blendedWaveshaper);
+        }
+        else
+        {
+            // Single-model (legacy): Drive is a pre-amplification multiplier.
+            // Makeup gain keeps output level consistent as Drive changes.
+            // Clamped at 0.25 (4× max boost) so near-zero Drive fades gracefully.
+            const float makeupGain = 1.0f / std::max (drive, 0.25f);
+            for (int n = 0; n < numSamples; ++n)
+            {
+                const float x = data[n] * drive;
+                data[n] = applyWaveshaper (x) * makeupGain;
+            }
         }
 
         // --- L1 FIR tone shaping applied post-saturation ---
@@ -169,22 +184,37 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 applyFIR (data, numSamples, firHistory[ch], firHistoryWritePos[ch]);
         }
 
-        // --- Weight high-shelf tilt ---
-        // One-pole LP at 800 Hz isolates the HF band.  The shelf gain is
-        // derived from weight so that all positions are full-spectrum:
-        //   weight=0.5 → shelfGain=1.0 → hardware-accurate (no tilt)
-        //   weight<0.5 → shelfGain<1.0 → HF cut, darker character
-        //   weight>0.5 → shelfGain>1.0 → HF boost, brighter character
-        // ±6 dB at the extremes keeps the range musical without sounding wrong.
-        if ((int) weightLpState.size() != numChannels)
-            weightLpState.assign (numChannels, 0.0f);
+        // --- Weight EQ ---
+        // weight=0.5 → hardware-accurate (flat)
+        // weight>0.5 → one-pole high-shelf boost at 800 Hz (+6 dB max, brighter)
+        // weight<0.5 → biquad low-shelf boost at 80 Hz (+6 dB max, Pultec-style warmer)
+        if ((int) weightLpState.size()  != numChannels)  weightLpState.assign  (numChannels, 0.0f);
+        if ((int) lowShelfState.size()  != numChannels)  lowShelfState.assign  (numChannels, {});
+
+        if (weight > 0.5f)
         {
-            const float shelfGain = std::pow (10.0f, (weight - 0.5f) * 0.6f);  // ±6 dB
+            // High-shelf boost only — gain > 1 at all weight > 0.5.
+            const float shelfGain = std::pow (10.0f, (weight - 0.5f) * 0.6f);  // 1–2×, 0–+6 dB
             float& lpS = weightLpState[ch];
             for (int n = 0; n < numSamples; ++n)
             {
-                lpS = (1.0f - weightLpAlpha) * data[n] + weightLpAlpha * lpS;
-                data[n] = lpS + shelfGain * (data[n] - lpS);
+                lpS      = (1.0f - weightLpAlpha) * data[n] + weightLpAlpha * lpS;
+                data[n]  = lpS + shelfGain * (data[n] - lpS);
+            }
+        }
+        else if (weight < 0.5f)
+        {
+            // Low-shelf boost — gain scales from 0 dB at centre to +6 dB at weight=0.
+            const float gainDb = (0.5f - weight) * 12.0f;
+            const auto [b0, b1, b2, a1c, a2c] = makeLowShelfCoeffs (gainDb, currentSampleRate);
+            auto& s = lowShelfState[ch];   // s = {xn1, xn2, yn1, yn2}
+            for (int n = 0; n < numSamples; ++n)
+            {
+                const float xn = data[n];
+                const float yn = b0*xn + b1*s[0] + b2*s[1] - a1c*s[2] - a2c*s[3];
+                s[1] = s[0];  s[0] = xn;
+                s[3] = s[2];  s[2] = yn;
+                data[n] = yn;
             }
         }
 
@@ -232,17 +262,61 @@ void HardwareColorProcessor::applyFIR (float* data, int numSamples,
 }
 
 //==============================================================================
-float HardwareColorProcessor::applyWaveshaper (float x) const
+float HardwareColorProcessor::applyWaveshaperTable (float x,
+                                                     const std::vector<float>& table)
 {
-    const auto& table = model.waveshaper;
-    const int   N     = (int) table.size();
+    const int N = (int) table.size();
     if (N == 0) return x;
 
-    // Map x from [-1, 1] to table index.
     const float idx = (x + 1.0f) * 0.5f * (float) (N - 1);
     const int   i0  = juce::jlimit (0, N - 2, (int) idx);
-    const float t   = idx - (float) i0;
+    const float t   = juce::jlimit (0.0f, 1.0f, idx - (float) i0);
     return table[i0] * (1.0f - t) + table[i0 + 1] * t;
+}
+
+float HardwareColorProcessor::applyWaveshaper (float x) const
+{
+    return applyWaveshaperTable (x, model.waveshaper);
+}
+
+//==============================================================================
+// Interpolate between the two neighbouring gain models at the given drive
+// position (0…10 mapped linearly across the gainModels array).
+// The result is cached; the 1024-element lerp only re-runs when lo/hi or t changes.
+void HardwareColorProcessor::updateBlendedWaveshaper (float drive)
+{
+    const int N = (int) model.gainModels.size();
+    if (N < 2) return;
+
+    const float pos = juce::jlimit (0.0f, (float) (N - 1),
+                                    drive / 10.0f * (float) (N - 1));
+    const int   lo  = juce::jlimit (0, N - 2, (int) pos);
+    const int   hi  = lo + 1;
+    const float t   = pos - (float) lo;
+
+    // Skip rebuild if nothing has changed.
+    if (lo == blendLoIdx && hi == blendHiIdx
+        && std::abs (t - blendT) < 0.0005f
+        && ! blendedWaveshaper.empty())
+        return;
+
+    blendLoIdx = lo;
+    blendHiIdx = hi;
+    blendT     = t;
+
+    const auto& wsLo = model.gainModels[lo].waveshaper;
+    const auto& wsHi = model.gainModels[hi].waveshaper;
+    const int   wsN  = (int) wsLo.size();
+
+    if ((int) wsHi.size() != wsN)   // safety: mismatched table sizes
+    {
+        blendedWaveshaper = wsLo;
+        return;
+    }
+
+    blendedWaveshaper.resize (wsN);
+    for (int i = 0; i < wsN; ++i)
+        blendedWaveshaper[i] = wsLo[i] * (1.0f - t) + wsHi[i] * t;
 }
 
 //==============================================================================
@@ -319,6 +393,35 @@ void HardwareColorProcessor::applyFIR_OLS (float* data, int numSamples,
 }
 
 //==============================================================================
+// RBJ low-shelf biquad at 80 Hz.  Shelf slope S=0.5 gives a broad, gradual
+// transition that evokes vintage transformer saturation rather than a surgical
+// digital shelf.  gainDb is the boost at DC (positive = boost only).
+HardwareColorProcessor::BiquadCoeffs
+HardwareColorProcessor::makeLowShelfCoeffs (float gainDb, double sampleRate)
+{
+    // A = sqrt(linear gain), per the RBJ cookbook.
+    const float A   = std::pow (10.0f, gainDb / 40.0f);
+    const float w0  = juce::MathConstants<float>::twoPi * 80.0f / (float) sampleRate;
+    const float cw  = std::cos (w0);
+    const float sw  = std::sin (w0);
+    constexpr float S = 0.5f;   // shelf slope: <1 = more gradual
+
+    // alpha term controls the shelf transition width.
+    const float alp = sw * 0.5f
+                      * std::sqrt ((A + 1.0f / A) * (1.0f / S - 1.0f) + 2.0f);
+    const float sqA = std::sqrt (A);
+
+    const float b0r =     A * ((A + 1.0f) - (A - 1.0f) * cw + 2.0f * sqA * alp);
+    const float b1r = 2.0f*A * ((A - 1.0f) - (A + 1.0f) * cw);
+    const float b2r =     A * ((A + 1.0f) - (A - 1.0f) * cw - 2.0f * sqA * alp);
+    const float a0r =         (A + 1.0f) + (A - 1.0f) * cw + 2.0f * sqA * alp;
+    const float a1r =  -2.0f * ((A - 1.0f) + (A + 1.0f) * cw);
+    const float a2r =          (A + 1.0f) + (A - 1.0f) * cw - 2.0f * sqA * alp;
+
+    return { b0r/a0r, b1r/a0r, b2r/a0r, a1r/a0r, a2r/a0r };
+}
+
+//==============================================================================
 juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
 {
     LNLModel newModel;
@@ -334,6 +437,43 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
         const double rate = (currentSampleRate > 0.0) ? currentSampleRate : model.sampleRate;
         model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
                           model.frFrequencies, model.frMagnitudeDb, rate);
+    }
+
+    // Backwards compatibility: if the artifact pre-dates the frFrequencies field,
+    // synthesize display data from the FIR's magnitude response so the spectrum
+    // display is populated even without re-running the analysis.
+    if (model.frFrequencies.empty() && model.l1Fir.size() > 1)
+    {
+        const double sr    = (currentSampleRate > 0.0) ? currentSampleRate : model.sampleRate;
+        const int    nFft  = AnalysisEngine::kDesignN;   // 4096
+        juce::dsp::FFT fft (12);                          // 2^12 = 4096
+
+        std::vector<float> buf (2 * nFft, 0.0f);
+        const int M = (int) std::min ((int) model.l1Fir.size(), nFft);
+        for (int i = 0; i < M; ++i)
+            buf[i] = model.l1Fir[i];
+        fft.performRealOnlyForwardTransform (buf.data());
+
+        // Collect magnitudes.
+        const int numBins = nFft / 2 + 1;
+        std::vector<float> mags (numBins);
+        for (int k = 0; k < numBins; ++k)
+        {
+            const float re = buf[2 * k], im = buf[2 * k + 1];
+            mags[k] = std::sqrt (re * re + im * im);
+        }
+
+        // Normalise to 0 dB at 1 kHz so the display is centred like the
+        // analysis-engine output.
+        const int bin1k = juce::jlimit (1, numBins - 1,
+                              (int) std::round (1000.0 * nFft / sr));
+        const float normMag = (mags[bin1k] > 1e-6f) ? mags[bin1k] : 1.0f;
+
+        for (int k = 0; k < numBins; ++k)
+        {
+            model.frFrequencies.push_back ((float) (k * sr / nFft));
+            model.frMagnitudeDb.push_back (20.0f * std::log10 (std::max (mags[k] / normMag, 1e-6f)));
+        }
     }
 
     // Reset FIR and dry-delay histories for all channels.
@@ -354,6 +494,13 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
     setupOverlapSave (numCh, olsBlockSize);
 
     weightLpState.assign (numCh, 0.0f);
+    lowShelfState.assign (numCh, {});
+
+    // Reset multi-model blend state — rebuilt on first processBlock.
+    blendedWaveshaper.clear();
+    blendLoIdx = 0;
+    blendHiIdx = 0;
+    blendT     = 0.0f;
 
     return {};
 }

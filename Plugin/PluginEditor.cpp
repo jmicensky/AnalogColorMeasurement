@@ -72,18 +72,26 @@ void HardwareColorEditor::buttonClicked (juce::Button* btn)
 
 void HardwareColorEditor::timerCallback()
 {
-    // Refresh the spectrum display at 10 Hz.  Calling repaint() directly from a
-    // button callback can be silently dropped by some plugin hosts; a timer
-    // guarantees the host processes the paint request.
     const bool hasModel = processor.hasModel();
     if (hasModel != lastModelState)
     {
         lastModelState = hasModel;
-        updateModelLabel();
+        updateModelLabel();   // also redraws spectrum
     }
 
     if (hasModel)
-        spectrumDisplay.repaint();
+    {
+        const float weight = processor.apvts.getRawParameterValue ("weight")->load();
+        if (weight != lastWeight)
+        {
+            lastWeight = weight;
+            updateSpectrumDisplay();   // recalculate + repaint on knob movement
+        }
+        else
+        {
+            spectrumDisplay.repaint(); // keep display alive in all hosts
+        }
+    }
 }
 
 void HardwareColorEditor::updateModelLabel()
@@ -95,13 +103,85 @@ void HardwareColorEditor::updateModelLabel()
                             + "  |  " + juce::String (m.sampleRate / 1000.0, 1) + " kHz"
                             + "  |  " + juce::String ((int) m.thdResults.size()) + " THD pts",
                             juce::dontSendNotification);
-        spectrumDisplay.setData (m.frFrequencies, m.frMagnitudeDb);
+        updateSpectrumDisplay();
     }
     else
     {
         modelLabel.setText ("No model loaded.", juce::dontSendNotification);
         spectrumDisplay.setData ({}, {});
     }
+}
+
+//==============================================================================
+// Recomputes the display curve as:  hardware FR  +  weight tilt shelf (in dB)
+// This lets the user see the tonal shape at the current Weight knob position.
+void HardwareColorEditor::updateSpectrumDisplay()
+{
+    if (! processor.hasModel()) { spectrumDisplay.setData ({}, {}); return; }
+
+    const auto& m = processor.getModel();
+    if (m.frFrequencies.empty()) { spectrumDisplay.setData ({}, {}); return; }
+
+    const float  weight = processor.apvts.getRawParameterValue ("weight")->load();
+    const double sr     = processor.getSampleRate() > 0.0
+                              ? processor.getSampleRate() : m.sampleRate;
+
+    const int numBins = (int) m.frFrequencies.size();
+    std::vector<float> adjustedDb (numBins);
+
+    if (weight > 0.5f + 1e-4f)
+    {
+        // --- Right of centre: one-pole high-shelf boost at 800 Hz ---
+        const float alpha     = std::exp (-juce::MathConstants<float>::twoPi
+                                          * 800.0f / (float) sr);
+        const float shelfGain = std::pow (10.0f, (weight - 0.5f) * 0.6f);
+
+        for (int i = 0; i < numBins; ++i)
+        {
+            const float omega = juce::MathConstants<float>::twoPi
+                                * m.frFrequencies[i] / (float) sr;
+            const float cosOm = std::cos (omega),  sinOm = std::sin (omega);
+            const float dRe   = 1.0f - alpha * cosOm,  dIm = alpha * sinOm;
+            const float dSq   = dRe*dRe + dIm*dIm;
+            const float lpRe  = (1.0f - alpha) * dRe / dSq;
+            const float lpIm  = -(1.0f - alpha) * dIm / dSq;
+            const float shRe  = shelfGain + (1.0f - shelfGain) * lpRe;
+            const float shIm  = (1.0f - shelfGain) * lpIm;
+            const float shDb  = 20.0f * std::log10 (
+                                    std::max (std::sqrt (shRe*shRe + shIm*shIm), 1e-6f));
+            adjustedDb[i] = m.frMagnitudeDb[i] + shDb;
+        }
+    }
+    else if (weight < 0.5f - 1e-4f)
+    {
+        // --- Left of centre: biquad low-shelf boost at 80 Hz (Pultec-style) ---
+        const float gainDb = (0.5f - weight) * 12.0f;
+        const auto [b0, b1, b2, a1, a2] =
+            HardwareColorProcessor::makeLowShelfCoeffs (gainDb, sr);
+
+        for (int i = 0; i < numBins; ++i)
+        {
+            const float omega  = juce::MathConstants<float>::twoPi
+                                 * m.frFrequencies[i] / (float) sr;
+            const float cosW   = std::cos (omega),  sinW = std::sin (omega);
+            const float cos2W  = 2.0f*cosW*cosW - 1.0f;
+            const float sin2W  = 2.0f*sinW*cosW;
+            const float numRe  = b0 + b1*cosW  + b2*cos2W;
+            const float numIm  = -(b1*sinW + b2*sin2W);
+            const float denRe  = 1.0f + a1*cosW  + a2*cos2W;
+            const float denIm  = -(a1*sinW + a2*sin2W);
+            const float mag    = std::sqrt (numRe*numRe + numIm*numIm)
+                                 / std::max (std::sqrt (denRe*denRe + denIm*denIm), 1e-6f);
+            adjustedDb[i] = m.frMagnitudeDb[i] + 20.0f * std::log10 (std::max (mag, 1e-6f));
+        }
+    }
+    else
+    {
+        // Centre: display raw hardware model response.
+        adjustedDb = m.frMagnitudeDb;
+    }
+
+    spectrumDisplay.setData (m.frFrequencies, adjustedDb);
 }
 
 //==============================================================================

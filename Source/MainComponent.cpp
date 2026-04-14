@@ -6,22 +6,6 @@
 
 MainComponent::MainComponent()
 {
-    // --- Reference file selector ---
-    refFileLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
-    addAndMakeVisible (refFileLabel);
-
-    refFileCombo.addItem ("(select file)", 1);
-    refFileCombo.addItem ("DRUMS",         2);
-    refFileCombo.addItem ("BASSDI",        3);
-    refFileCombo.addItem ("ElecKeys",      4);
-    refFileCombo.addItem ("Sine Sweep",    5);
-    refFileCombo.addItem ("Pink Noise",    6);
-    refFileCombo.addItem ("Sine 1 kHz",    7);
-    refFileCombo.addItem ("Sine 100 Hz",   8);
-    refFileCombo.setSelectedId (1);
-    refFileCombo.onChange = [this] { onRefFileSelected(); };
-    addAndMakeVisible (refFileCombo);
-
     // --- Project setup ---
     projectLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (projectLabel);
@@ -76,12 +60,7 @@ MainComponent::MainComponent()
     setupQualityButton (hifiButton,     CaptureQuality::HiFi);
 
     // --- Input level meter ---
-    inputMeterLabel.setText ("IN: ---", juce::dontSendNotification);
-    inputMeterLabel.setJustificationType (juce::Justification::centred);
-    inputMeterLabel.setColour (juce::Label::backgroundColourId, juce::Colours::black);
-    inputMeterLabel.setColour (juce::Label::textColourId, juce::Colours::limegreen);
-    addAndMakeVisible (inputMeterLabel);
-
+    addAndMakeVisible (returnMeter);
     meterTimer.owner = this;
     meterTimer.startTimer (100);
 
@@ -130,13 +109,12 @@ MainComponent::MainComponent()
     planLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (planLabel);
 
-    gainLabelsLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
-    addAndMakeVisible (gainLabelsLabel);
-
-    gainLabelsEditor.setTextToShowWhenEmpty ("-18, -12, -6, 0, +6",
-                                             juce::Colours::grey);
-    gainLabelsEditor.setInputRestrictions (128);
-    addAndMakeVisible (gainLabelsEditor);
+    planPresetCombo.addItem ("Saturation \xe2\x80\x94 Standard  (-18, -12, -6, 0, +3, +6)",  1);
+    planPresetCombo.addItem ("Saturation \xe2\x80\x94 Extended  (-24, -18, -12, -9, -6, -3, 0, +3, +6)", 2);
+    planPresetCombo.addItem ("Saturation \xe2\x80\x94 Percentage  (0%, 50%, 75%, 90%, 100%)", 3);
+    planPresetCombo.addItem ("Compression  (-24, -18, -12, -6, 0, +6, +12)", 4);
+    planPresetCombo.setSelectedId (1, juce::dontSendNotification);
+    addAndMakeVisible (planPresetCombo);
 
     buildPlanButton.onClick = [this] { onBuildPlanClicked(); };
     addAndMakeVisible (buildPlanButton);
@@ -155,7 +133,7 @@ MainComponent::MainComponent()
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
 
-    setSize (900, 720);
+    setSize (1200, 720);
 }
 
 MainComponent::~MainComponent() {}
@@ -198,20 +176,9 @@ juce::String MainComponent::loadStimulusByName (const juce::String& name)
 //==============================================================================
 void MainComponent::MeterTimer::timerCallback()
 {
-    const float db = owner->audioEngine.getReturnPeakDb();
-    juce::String text;
-    if (db <= -100.0f)
-        text = "IN: silence";
-    else
-        text = "IN: " + juce::String (db, 1) + " dBFS";
-
-    // Colour: green below -18, yellow -18 to -6, red above -6
-    juce::Colour colour = (db < -18.0f) ? juce::Colours::limegreen
-                        : (db < -6.0f)  ? juce::Colours::yellow
-                                         : juce::Colours::red;
-
-    owner->inputMeterLabel.setText (text, juce::dontSendNotification);
-    owner->inputMeterLabel.setColour (juce::Label::textColourId, colour);
+    owner->returnMeter.setLevels (
+        juce::Decibels::decibelsToGain (owner->audioEngine.getReturnPeakDb(), -100.0f),
+        juce::Decibels::decibelsToGain (owner->audioEngine.getReturnRmsDb(),  -100.0f));
 }
 
 void MainComponent::populateProjectCombo()
@@ -343,13 +310,14 @@ void MainComponent::onBuildPlanClicked()
         return;
     }
 
-    const juce::String csv = gainLabelsEditor.getText().trim();
-    if (csv.isEmpty())
-    {
-        statusLabel.setText ("ERROR: Enter at least one gain level before building a plan.",
-                             juce::dontSendNotification);
-        return;
-    }
+    static const juce::StringArray kPresetCsv {
+        "-18, -12, -6, 0, +3, +6",
+        "-24, -18, -12, -9, -6, -3, 0, +3, +6",
+        "0%, 50%, 75%, 90%, 100%",
+        "-24, -18, -12, -6, 0, +6, +12"
+    };
+    const int presetIdx = planPresetCombo.getSelectedId() - 1;
+    const juce::String csv = kPresetCsv[juce::jlimit (0, 3, presetIdx)];
 
     stimulusPlan.build (csv, captureQuality);
     markers.clear();
@@ -478,22 +446,6 @@ void MainComponent::onAudioSettingsClicked()
         }));
 }
 
-void MainComponent::onRefFileSelected()
-{
-    const int id = refFileCombo.getSelectedId();
-    if (id < 2)
-        return;
-
-    const juce::StringArray names { "DRUMS", "BASSDI", "ElecKeys",
-                                    "SineSweep", "PinkNoise", "Sine1kHz", "Sine100Hz" };
-    const juce::String name = names[id - 2];
-
-    auto err = loadStimulusByName (name);
-    if (err.isNotEmpty())
-        statusLabel.setText ("ERROR loading ref file: " + err, juce::dontSendNotification);
-    else
-        statusLabel.setText ("Reference file loaded: " + name, juce::dontSendNotification);
-}
 
 void MainComponent::timerCallback()
 {
@@ -792,7 +744,6 @@ void MainComponent::paint (juce::Graphics& g)
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
 
     g.setColour (juce::Colours::grey);
-    g.drawHorizontalLine (52,               10.0f, (float) getWidth() - 10);  // below ref selector
     g.drawHorizontalLine (96,               10.0f, (float) getWidth() - 10);  // below project
     g.drawHorizontalLine (152,              10.0f, (float) getWidth() - 10);  // below mode
     g.drawHorizontalLine (318,              10.0f, (float) getWidth() - 10);  // below routing+mono
@@ -805,11 +756,6 @@ void MainComponent::resized()
     const int rowH   = 28;
     const int labelW = 160;
     int y = margin;
-
-    // --- Reference file selector ---
-    refFileLabel.setBounds (margin,          y, labelW, rowH);
-    refFileCombo.setBounds (margin + labelW, y, 220,    rowH);
-    y += rowH + margin;
 
     // --- Project setup ---
     projectLabel.setBounds (margin,        y, 80,  rowH);
@@ -845,9 +791,8 @@ void MainComponent::resized()
     sendLabel  .setBounds (margin,          y, labelW, rowH);
     sendCombo  .setBounds (margin + labelW, y, 220,    rowH);
     y += rowH + 6;
-    returnLabel     .setBounds (margin,              y, labelW, rowH);
-    returnCombo     .setBounds (margin + labelW,     y, 220,    rowH);
-    inputMeterLabel .setBounds (margin + labelW + 228, y, 130,  rowH);
+    returnLabel.setBounds (margin,          y, labelW, rowH);
+    returnCombo.setBounds (margin + labelW, y, 220,    rowH);
     y += rowH + 6;
     monitorLabel.setBounds (margin,          y, labelW, rowH);
     monitorCombo.setBounds (margin + labelW, y, 220,    rowH);
@@ -860,20 +805,24 @@ void MainComponent::resized()
     analyseButton.setBounds (margin + 210, y, 180, rowH);
     y += rowH + margin + 8;
 
-    // Left column width: controls fit within ~460 px, leave right for spectrum.
+    // Left column width: controls fit within ~460 px, leave right for meter + spectrum.
     const int splitX   = 470;
-    const int rightX   = splitX + margin;
+    const int meterW   = 42;             // vertical level meter strip
+    const int meterX   = splitX + margin;
+    const int rightX   = meterX + meterW + margin;
     const int rightW   = getWidth() - rightX - margin;
     const int bottomY  = getHeight() - 40;
 
     // --- Plan editor (left column) ---
     planLabel.setBounds (margin, y, 200, 20);
     y += 24;
-    gainLabelsLabel .setBounds (margin,                y, labelW, rowH);
-    gainLabelsEditor.setBounds (margin + labelW,       y, 260,    rowH);
-    buildPlanButton .setBounds (margin + labelW + 268, y, 110,    rowH);
+    planPresetCombo.setBounds (margin,                           y, splitX - margin * 2 - 118, rowH);
+    buildPlanButton.setBounds (splitX - margin * 2 - 118 + 8 + margin, y, 110,                  rowH);
     y += rowH + 8;
     planList.setBounds (margin, y, splitX - margin * 2, bottomY - y);
+
+    // --- Vertical level meter (between controls and spectrum) ---
+    returnMeter.setBounds (meterX, 8, meterW, bottomY - 8);
 
     // --- Spectrum display (right column) ---
     spectrumDisplay.setBounds (rightX, 8, rightW, bottomY - 8);

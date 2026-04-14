@@ -60,7 +60,13 @@ private:
     void setupOverlapSave (int numChannels, int samplesPerBlock);
 
     // Table-lookup waveshaper with linear interpolation.
+    // Overload takes an explicit table so the multi-model blended table can be used.
     float applyWaveshaper (float x) const;
+    static float applyWaveshaperTable (float x, const std::vector<float>& table);
+
+    // Recomputes blendedWaveshaper from the two neighbouring gain models at the
+    // given drive position.  Cheap (1024-element lerp); called once per block.
+    void updateBlendedWaveshaper (float drive);
 
     LNLModel model;
 
@@ -87,10 +93,29 @@ private:
     std::vector<int>                dryDelayWritePos;
     int                             dryGroupDelay { 0 };
 
-    // Weight high-shelf: one-pole LP at 800 Hz, ±6 dB shelf gain.
-    // weight=0.5 → hardware-accurate; <0.5 → darker; >0.5 → brighter.
+public:
+    // Biquad coefficients (normalised — a0 absorbed into b's, a0=1).
+    struct BiquadCoeffs { float b0, b1, b2, a1, a2; };
+
+    // RBJ low-shelf at 80 Hz, shelf-slope S=0.5 (gradual Pultec character).
+    // gainDb: boost amount (positive = boost).  Called from both processBlock
+    // and the editor's spectrum display so they always match exactly.
+    static BiquadCoeffs makeLowShelfCoeffs (float gainDb, double sampleRate);
+
+private:
+    // Multi-model blend state.
+    std::vector<float> blendedWaveshaper;  // interpolated table for current drive
+    int   blendLoIdx { 0 };
+    int   blendHiIdx { 0 };
+    float blendT     { 0.0f };
+
+    // Weight EQ state.
+    // Right of centre (weight>0.5): one-pole high shelf at 800 Hz.
+    // Left  of centre (weight<0.5): biquad low shelf  at  80 Hz.
     float weightLpAlpha { 0.0f };
-    std::vector<float> weightLpState;
+    std::vector<float>               weightLpState;
+    // Per-channel biquad delay line: [x[n-1], x[n-2], y[n-1], y[n-2]]
+    std::vector<std::array<float,4>> lowShelfState;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (HardwareColorProcessor)
 };

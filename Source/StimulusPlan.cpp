@@ -8,6 +8,11 @@ void StimulusPlan::build (const juce::String& gainsCsv, CaptureQuality quality)
     const juce::StringArray stimuli = StimulusNames::forQuality (quality);
     auto tokens = juce::StringArray::fromTokens (gainsCsv, ",", "");
 
+    // Always capture highest drive level first so gain staging can be set
+    // once against the loudest/most saturated step without readjustment.
+    for (int i = 0, j = tokens.size() - 1; i < j; ++i, --j)
+        std::swap (tokens.getReference (i), tokens.getReference (j));
+
     for (const auto& token : tokens)
     {
         const juce::String label = token.trim();

@@ -19,7 +19,10 @@ private:
     void timerCallback() override;
     void updateModelLabel();
 
-    bool lastModelState { false };
+    bool  lastModelState { false };
+    float lastWeight     { -1.0f };  // force update on first tick
+
+    void updateSpectrumDisplay();   // applies current weight tilt to stored FR
 
     HardwareColorProcessor& processor;
 

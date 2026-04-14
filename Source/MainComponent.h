@@ -5,6 +5,7 @@
 #include "SessionWriter.h"
 #include "StimulusPlan.h"
 #include "SpectrumDisplay.h"
+#include "LevelMeter.h"
 
 class MainComponent : public juce::Component,
                       private juce::Timer
@@ -62,7 +63,6 @@ private:
     void onBuildPlanClicked();
     juce::String readModeFromSessionJson (const juce::File& folder) const;
     void onMeasureButtonClicked();
-    void onRefFileSelected();
     void onAudioSettingsClicked();
     void onAnalyseClicked();
     void timerCallback() override;
@@ -70,10 +70,6 @@ private:
     // Loads a named stimulus into AudioEngine from BinaryData.
     // Returns an error string on failure, empty string on success.
     juce::String loadStimulusByName (const juce::String& name);
-
-    // --- Reference file selector ---
-    juce::Label    refFileLabel  { {}, "Reference File:" };
-    juce::ComboBox refFileCombo;
 
     // --- Project setup ---
     juce::Label      projectLabel  { {}, "Project:" };
@@ -110,14 +106,13 @@ private:
 
     // --- Plan editor ---
     juce::Label      planLabel;
-    juce::Label      gainLabelsLabel { {}, "Gain Levels (csv):" };
-    juce::TextEditor gainLabelsEditor;
+    juce::ComboBox   planPresetCombo;
     juce::TextButton buildPlanButton { "Build Plan" };
     PlanListModel    planListModel;
     juce::ListBox    planList;
 
-    // --- Status bar ---
-    juce::Label inputMeterLabel;
+    // --- Input level meter ---
+    LevelMeter returnMeter;
 
     struct MeterTimer : juce::Timer {
         MainComponent* owner;

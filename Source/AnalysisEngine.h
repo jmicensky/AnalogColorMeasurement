@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include <map>
 #include <vector>
 #include "LNLModel.h"
 
@@ -30,14 +31,22 @@ public:
 
 private:
     // --- Per-step analysis ---
-    // Computes |H[k]| = |Rec[k]| / |Ref[k]| from one capture pair.
-    // Output has designBins = kDesignN/2 + 1 values, linearly interpolated
-    // from the native FFT resolution.
-    static std::vector<float> computeMagnitudeResponse (
+    // Offline Wiener-filter estimation of the transfer function.
+    // Computes the complex cross-spectrum conj(X)·Y and the reference power |X|²,
+    // both resampled to designBins resolution.
+    //
+    // Accumulating these across N sweeps before dividing gives *coherent* averaging:
+    // uncorrelated noise cancels, so SNR grows as N rather than √N.  This is
+    // equivalent to running NLMS with a vanishingly small step size (i.e. fully
+    // converged to the Wiener optimum) for each frequency band simultaneously.
+    static void computeCrossSpectrum (
         const juce::AudioBuffer<float>& ref,
         const juce::AudioBuffer<float>& rec,
         int numSamples,
-        double sampleRate);
+        double sampleRate,
+        std::vector<double>& outCrossRe,    // Re(conj(X)·Y), designBins
+        std::vector<double>& outCrossIm,    // Im(conj(X)·Y), designBins
+        std::vector<double>& outRefPower);  // |X|²,          designBins
 
     // Designs a linear-phase FIR of length numTaps from a half-spectrum
     // magnitude array (kDesignN/2 + 1 entries).
@@ -73,7 +82,22 @@ private:
     // --- Constants ---
     static constexpr int kTableSize = 1024;  // waveshaper table entries
 
-    // --- Waveshaper accumulator (reset before each project analysis) ---
+    // Shared waveshaper finalisation logic.  Fills wsOut from raw accumulator
+    // data using the same interpolation, extrapolation and slope-normalisation
+    // steps as the global finaliseWaveshaper.
+    static void finaliseWaveshaperInto (std::vector<float>& wsOut,
+                                        const std::vector<float>& accum,
+                                        const std::vector<int>&   counts);
+
+    // Builds model.gainModels from the per-gain accumulators collected during
+    // analyseSineTone.  Called once after finaliseWaveshaper.
+    static void populateGainModels (LNLModel& model);
+
+    // --- Global waveshaper accumulator (reset before each project analysis) ---
     static std::vector<float> wsAccum;
     static std::vector<int>   wsCounts;
+
+    // --- Per-gain-label waveshaper accumulators ---
+    static std::map<juce::String, std::vector<float>> perGainWsAccum;
+    static std::map<juce::String, std::vector<int>>   perGainWsCounts;
 };

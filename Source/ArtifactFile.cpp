@@ -50,6 +50,21 @@ juce::String ArtifactFile::save (const LNLModel& model, const juce::File& file)
     }
     root->setProperty ("thdResults", thdArr);
 
+    // Per-gain-level models (absent in single-model artifacts).
+    if (! model.gainModels.empty())
+    {
+        juce::Array<juce::var> gmArr;
+        for (const auto& gm : model.gainModels)
+        {
+            auto* obj = new juce::DynamicObject();
+            obj->setProperty ("gainLabel",  gm.gainLabel);
+            obj->setProperty ("gainValue",  (double) gm.gainValue);
+            obj->setProperty ("waveshaper", vecToVar (gm.waveshaper));
+            gmArr.add (juce::var (obj));
+        }
+        root->setProperty ("gainModels", gmArr);
+    }
+
     const juce::String json = juce::JSON::toString (juce::var (root), true);
 
     if (! file.replaceWithText (json))
@@ -90,6 +105,19 @@ juce::String ArtifactFile::load (const juce::File& file, LNLModel& model)
             e.thdPercent             = (float)(double) item["thdPercent"];
             e.fundamentalAmplitudeDb = (float)(double) item["fundamentalAmplitudeDb"];
             model.thdResults.push_back (e);
+        }
+    }
+
+    model.gainModels.clear();
+    if (auto* gmArr = parsed["gainModels"].getArray())
+    {
+        for (const auto& item : *gmArr)
+        {
+            GainModel gm;
+            gm.gainLabel  = item["gainLabel"].toString();
+            gm.gainValue  = (float)(double) item["gainValue"];
+            gm.waveshaper = varToVec (item["waveshaper"]);
+            model.gainModels.push_back (std::move (gm));
         }
     }
 

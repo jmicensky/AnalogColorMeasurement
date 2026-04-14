@@ -58,9 +58,10 @@ public:
     // LatencyAligner::findLatencySamples directly.
     void trimRecBuffer (float lagSamples);
 
-    // Current peak level (dBFS) of the configured return channel.
+    // Current peak and RMS levels (dBFS) of the configured return channel.
     // Updated continuously by the audio callback — safe to call from any thread.
     float getReturnPeakDb() const;
+    float getReturnRmsDb()  const;
 
     // Persist audio device settings (device, sample rate, buffer size).
     // Call after the user closes the audio settings dialog.
@@ -110,6 +111,8 @@ private:
     std::atomic<int>   monitorChannel { -1 };   // -1 = not set
     std::atomic<int>   returnChannel  { 0 };
     std::atomic<float> returnPeakLinear { 0.0f };
+    std::atomic<float> returnRmsLinear  { 0.0f };
+    float              rmsAccum         { 0.0f };  // audio-thread-only leaky integrator
 
     // Returns ~/Library/Application Support/HardwareProfiler/audioSettings.xml
     static juce::File getSettingsFile();

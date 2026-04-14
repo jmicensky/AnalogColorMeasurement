@@ -49,7 +49,7 @@ void SpectrumDisplay::paint (juce::Graphics& g)
     g.fillRect (left, top, plotW, plotH);
 
     // --- dB grid lines ---
-    const float dbGrid[] = { -24.0f, -18.0f, -12.0f, -6.0f, 0.0f, 6.0f, 12.0f };
+    const float dbGrid[] = { -8.0f, -6.0f, -4.0f, -2.0f, 0.0f, 2.0f, 4.0f, 6.0f };
     g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
 
     for (float db : dbGrid)

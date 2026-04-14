@@ -1,8 +1,10 @@
 #include "AnalysisEngine.h"
 
 // Static member definitions
-std::vector<float> AnalysisEngine::wsAccum;
-std::vector<int>   AnalysisEngine::wsCounts;
+std::vector<float>                                   AnalysisEngine::wsAccum;
+std::vector<int>                                     AnalysisEngine::wsCounts;
+std::map<juce::String, std::vector<float>>           AnalysisEngine::perGainWsAccum;
+std::map<juce::String, std::vector<int>>             AnalysisEngine::perGainWsCounts;
 
 //==============================================================================
 // Entry point
@@ -18,12 +20,20 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
     bool   srDetected = false;
 
     // ---- 1.  Frequency response from SineSweep captures ----
+    // Uses Wiener-filter estimation (equivalent to fully-converged NLMS/RLS):
+    // accumulate complex cross-spectra conj(X)·Y and reference power |X|²
+    // across all sweeps, then compute H = sum(conj(X)·Y) / (sum(|X|²) + λ).
+    // Coherent averaging means noise cancels as N (not √N), and the Wiener
+    // denominator naturally suppresses poorly-excited bins rather than
+    // clamping them to a fixed noise floor.
     juce::Array<juce::File> sweepRefs;
     folder.findChildFiles (sweepRefs, juce::File::findFiles, true,
                            "*_SineSweep_ref.wav");
 
     const int designBins = kDesignN / 2 + 1;
-    std::vector<float> hMagAccum (designBins, 0.0f);
+    std::vector<double> crossRe  (designBins, 0.0);
+    std::vector<double> crossIm  (designBins, 0.0);
+    std::vector<double> refPower (designBins, 0.0);
     int sweepCount = 0;
 
     for (const auto& refFile : sweepRefs)
@@ -40,43 +50,57 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
         detectedSR = sampleRate;
         srDetected = true;
 
-        auto hMag = computeMagnitudeResponse (refBuf, recBuf, numSamples, sampleRate);
-        jassert ((int) hMag.size() == designBins);
+        std::vector<double> cRe, cIm, rPow;
+        computeCrossSpectrum (refBuf, recBuf, numSamples, sampleRate, cRe, cIm, rPow);
 
         for (int k = 0; k < designBins; ++k)
-            hMagAccum[k] += hMag[k];
-
+        {
+            crossRe  [k] += cRe  [k];
+            crossIm  [k] += cIm  [k];
+            refPower [k] += rPow [k];
+        }
         ++sweepCount;
     }
 
     if (sweepCount > 0)
     {
-        for (auto& v : hMagAccum) v /= (float) sweepCount;
-        smoothMagnitude (hMagAccum, detectedSR);
+        // Wiener estimate: H[k] = conj(X)·Y / (|X|² + λ)
+        // λ is set to 1e-6 × peak reference power (~−60 dB relative).
+        // Being offline we can afford a very tight floor; poorly-excited bins
+        // (e.g. near Nyquist for a log sweep) are suppressed toward zero rather
+        // than amplified to a noise floor as in simple spectral division.
+        const double maxPow = *std::max_element (refPower.begin(), refPower.end());
+        const double lambda = 1e-6 * maxPow;
+
+        std::vector<float> hMag (designBins);
+        for (int k = 0; k < designBins; ++k)
+        {
+            const double num = std::sqrt (crossRe[k] * crossRe[k] + crossIm[k] * crossIm[k]);
+            hMag[k] = (float) (num / (refPower[k] + lambda));
+        }
+
+        smoothMagnitude (hMag, detectedSR);
 
         const int bin1k = juce::jlimit (1, designBins - 1,
                               (int) std::round (1000.0 * kDesignN / detectedSR));
 
-        // Quality gate: if 1 kHz response is below -40 dB (amplitude 0.01) the
-        // sweep recordings were likely silent or near-silent (e.g. recorded before
-        // the mic-permission bug was fixed).  Fall back to identity FIR rather
-        // than producing a badly wrong filter.
-        if (hMagAccum[bin1k] >= 0.01f)
+        // Quality gate: if 1 kHz response is below -40 dB the sweep recordings
+        // were likely silent or near-silent.  Fall back to identity FIR.
+        if (hMag[bin1k] >= 0.01f)
         {
             // Normalise to unity gain at 1 kHz so the FIR models shape only.
-            const float norm = 1.0f / hMagAccum[bin1k];
-            for (auto& v : hMagAccum) v *= norm;
+            const float norm = 1.0f / hMag[bin1k];
+            for (auto& v : hMag) v *= norm;
 
-            model.l1Fir = designLinearPhaseFIR (hMagAccum);
+            model.l1Fir = designLinearPhaseFIR (hMag);
 
             // Store the tapered magnitude so the display curve matches the FIR.
-            // Apply the same 85%–Nyquist half-cosine taper used inside designLinearPhaseFIR.
             const int taperStart = (int) (0.80f * (float) (designBins - 1));
             const int taperEnd   = designBins - 1;
 
             for (int k = 0; k < designBins; ++k)
             {
-                float v = hMagAccum[k];
+                float v = hMag[k];
                 if (k >= taperStart)
                 {
                     const float t = (float) (k - taperStart) / (float) (taperEnd - taperStart);
@@ -90,7 +114,6 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
         {
             // Bad sweep data — identity FIR, flat display curve.
             model.l1Fir = { 1.0f };
-
             for (int k = 0; k < designBins; ++k)
             {
                 model.frFrequencies.push_back ((float) (k * detectedSR / kDesignN));
@@ -106,6 +129,8 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
     // ---- 2.  THD + waveshaper from sine-tone captures ----
     wsAccum .assign (kTableSize, 0.0f);
     wsCounts.assign (kTableSize, 0);
+    perGainWsAccum .clear();
+    perGainWsCounts.clear();
 
     for (const auto& [stimName, fundHz] :
          std::initializer_list<std::pair<juce::String, float>>
@@ -137,19 +162,34 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
     }
 
     finaliseWaveshaper (model);
+    populateGainModels (model);
     model.sampleRate = detectedSR;
 
     return {};
 }
 
 //==============================================================================
-// Compute |H[k]| = |Rec[k]| / |Ref[k]|, resampled to kDesignN/2+1 bins.
+// Wiener-filter transfer function estimation (offline, accuracy-first).
+//
+// Returns conj(X)·Y (complex cross-spectrum) and |X|² (reference power) both
+// resampled to designBins resolution.  The caller accumulates these across
+// multiple sweeps and divides once at the end:
+//
+//   H[k] = sum_i( conj(Xi)·Yi ) / ( sum_i(|Xi|²) + λ )
+//
+// This is the frequency-domain Wiener filter — equivalent to running NLMS with
+// a step size that approaches zero (fully converged, minimum-MSE solution).
+// Coherent averaging improves SNR as N (not √N), and the λ denominator
+// suppresses bins where the reference has low energy rather than amplifying them.
 //==============================================================================
-std::vector<float> AnalysisEngine::computeMagnitudeResponse (
+void AnalysisEngine::computeCrossSpectrum (
     const juce::AudioBuffer<float>& ref,
     const juce::AudioBuffer<float>& rec,
     int numSamples,
-    double sampleRate)
+    double /*sampleRate*/,
+    std::vector<double>& outCrossRe,
+    std::vector<double>& outCrossIm,
+    std::vector<double>& outRefPower)
 {
     // Choose FFT order to cover numSamples.
     int fftOrder = 1;
@@ -162,8 +202,6 @@ std::vector<float> AnalysisEngine::computeMagnitudeResponse (
     std::vector<float> recData (2 * N, 0.0f);
 
     const int numSrc = std::min (numSamples, N);
-
-    // Use channel 0 for mono analysis.
     std::copy_n (ref.getReadPointer (0), numSrc, refData.data());
     std::copy_n (rec.getReadPointer (0), numSrc, recData.data());
 
@@ -171,44 +209,40 @@ std::vector<float> AnalysisEngine::computeMagnitudeResponse (
     fft.performRealOnlyForwardTransform (recData.data());
 
     const int nativeBins = N / 2 + 1;
-    std::vector<float> hMagNative (nativeBins);
 
-    // Compute reference magnitudes and find the peak for regularization.
-    // A log sine sweep has much lower energy near Nyquist than in the mid-band,
-    // so X_abs there can be tiny. Without a regularization floor, Y_abs/X_abs
-    // amplifies noise into a spurious HF boost.
-    // Regularization floor = 1% of peak reference magnitude (-40 dB relative).
-    std::vector<float> X_mags (nativeBins);
-    float X_peak = 0.0f;
-    for (int k = 0; k < nativeBins; ++k)
-    {
-        const float Xre = refData[2 * k], Xim = refData[2 * k + 1];
-        X_mags[k] = std::sqrt (Xre * Xre + Xim * Xim);
-        X_peak = std::max (X_peak, X_mags[k]);
-    }
-    const float regFloor = 0.01f * X_peak;   // -40 dB relative to peak
+    // Compute complex cross-spectrum conj(X)·Y and reference power |X|²
+    // at native FFT bins using double precision to preserve accuracy
+    // across the wide dynamic range of a log sine sweep.
+    std::vector<double> nativeCrossRe (nativeBins);
+    std::vector<double> nativeCrossIm (nativeBins);
+    std::vector<double> nativeRefPow  (nativeBins);
 
     for (int k = 0; k < nativeBins; ++k)
     {
-        const float Yre = recData[2 * k], Yim = recData[2 * k + 1];
-        const float Y_abs = std::sqrt (Yre * Yre + Yim * Yim);
-        hMagNative[k] = Y_abs / std::max (X_mags[k], regFloor);
+        const double Xre = refData[2 * k],  Xim = refData[2 * k + 1];
+        const double Yre = recData[2 * k],  Yim = recData[2 * k + 1];
+        // conj(X) · Y = (Xre − j·Xim)(Yre + j·Yim)
+        nativeCrossRe[k] = Xre * Yre + Xim * Yim;
+        nativeCrossIm[k] = Xre * Yim - Xim * Yre;
+        nativeRefPow [k] = Xre * Xre + Xim * Xim;
     }
 
     // Resample to designBins via linear interpolation.
     const int designBins = kDesignN / 2 + 1;
-    std::vector<float> hMag (designBins);
+    outCrossRe .assign (designBins, 0.0);
+    outCrossIm .assign (designBins, 0.0);
+    outRefPower.assign (designBins, 0.0);
 
     for (int i = 0; i < designBins; ++i)
     {
-        const float frac = (float) i / (float) (designBins - 1) * (float) (nativeBins - 1);
-        const int j0 = (int) frac;
-        const int j1 = std::min (j0 + 1, nativeBins - 1);
-        const float t = frac - (float) j0;
-        hMag[i] = hMagNative[j0] * (1.0f - t) + hMagNative[j1] * t;
+        const double frac = (double) i / (double) (designBins - 1) * (double) (nativeBins - 1);
+        const int    j0   = (int) frac;
+        const int    j1   = std::min (j0 + 1, nativeBins - 1);
+        const double t    = frac - (double) j0;
+        outCrossRe [i] = nativeCrossRe[j0] * (1.0 - t) + nativeCrossRe[j1] * t;
+        outCrossIm [i] = nativeCrossIm[j0] * (1.0 - t) + nativeCrossIm[j1] * t;
+        outRefPower[i] = nativeRefPow [j0] * (1.0 - t) + nativeRefPow [j1] * t;
     }
-
-    return hMag;
 }
 
 //==============================================================================
@@ -448,15 +482,138 @@ void AnalysisEngine::analyseSineTone (const juce::AudioBuffer<float>& ref,
                                        std::max (peakMag / (float) (fftSize / 2), 1e-6f));
     model.thdResults.push_back (entry);
 
-    // Accumulate waveshaper scatter: bin ref[n] → average rec[n].
+    // Remove DC offset before scatter accumulation.
+    // Asymmetric clipping devices (e.g. diode mixtures) can bias the output;
+    // leaving DC in would shift the entire waveshaper table and add a constant
+    // offset to every processed sample in the plugin.
+    double dcSum = 0.0;
+    for (int n = startSample; n < startSample + available; ++n)
+        dcSum += recPtr[n];
+    const float dcOffset = (float) (dcSum / available);
+
+    // Accumulate waveshaper scatter: bin ref[n] → average rec[n] (DC-removed).
     const float* refPtr = ref.getReadPointer (0);
+
+    // Ensure per-gain buffers exist for this gain label.
+    if (perGainWsAccum.find (gainLabel) == perGainWsAccum.end())
+    {
+        perGainWsAccum [gainLabel].assign (kTableSize, 0.0f);
+        perGainWsCounts[gainLabel].assign (kTableSize, 0);
+    }
+    auto& pgAccum  = perGainWsAccum [gainLabel];
+    auto& pgCounts = perGainWsCounts[gainLabel];
+
     for (int n = startSample; n < startSample + available; ++n)
     {
         const float x = juce::jlimit (-1.0f, 1.0f, refPtr[n]);
         const int binIdx = juce::jlimit (0, kTableSize - 1,
                                (int) ((x + 1.0f) * 0.5f * (float) (kTableSize - 1)));
-        wsAccum[binIdx]  += rec.getSample (0, n);
+        const float y = recPtr[n] - dcOffset;
+        wsAccum[binIdx]  += y;
         wsCounts[binIdx] += 1;
+        pgAccum [binIdx] += y;
+        pgCounts[binIdx] += 1;
+    }
+}
+
+//==============================================================================
+// Shared waveshaper finalisation: average, interpolate, extrapolate, normalise.
+//==============================================================================
+void AnalysisEngine::finaliseWaveshaperInto (std::vector<float>& wsOut,
+                                              const std::vector<float>& accum,
+                                              const std::vector<int>&   counts)
+{
+    wsOut.resize (kTableSize);
+
+    // Average each populated bin.
+    for (int i = 0; i < kTableSize; ++i)
+    {
+        if (counts[i] > 0)
+            wsOut[i] = accum[i] / (float) counts[i];
+        else
+            wsOut[i] = -1.0f + 2.0f * (float) i / (float) (kTableSize - 1);  // identity
+    }
+
+    // Fill any un-hit bins by linear interpolation between neighbours.
+    for (int i = 1; i < kTableSize - 1; ++i)
+    {
+        if (counts[i] == 0)
+        {
+            int j = i + 1;
+            while (j < kTableSize - 1 && counts[j] == 0) ++j;
+
+            if (counts[i - 1] > 0 && counts[j] > 0)
+            {
+                const float y0   = wsOut[i - 1];
+                const float y1   = wsOut[j];
+                const int   span = j - (i - 1);
+                for (int k = i; k < j; ++k)
+                {
+                    const float t = (float) (k - (i - 1)) / (float) span;
+                    wsOut[k] = y0 * (1.0f - t) + y1 * t;
+                }
+                i = j - 1;
+            }
+        }
+    }
+
+    // Extrapolate linearly at extreme unpopulated bins.
+    {
+        int firstPop = -1, lastPop = -1;
+        for (int i = 0; i < kTableSize; ++i)
+            if (counts[i] > 0) { if (firstPop < 0) firstPop = i; lastPop = i; }
+
+        if (firstPop > 0)
+        {
+            float slope = -1.0f;
+            for (int i = firstPop + 1; i <= std::min (firstPop + 8, kTableSize - 1); ++i)
+            {
+                if (counts[i] > 0)
+                {
+                    slope = (wsOut[i] - wsOut[firstPop]) / (float) (i - firstPop);
+                    break;
+                }
+            }
+            for (int i = 0; i < firstPop; ++i)
+                wsOut[i] = wsOut[firstPop] + slope * (float) (i - firstPop);
+        }
+
+        if (lastPop >= 0 && lastPop < kTableSize - 1)
+        {
+            float slope = -1.0f;
+            for (int i = lastPop - 1; i >= std::max (lastPop - 8, 0); --i)
+            {
+                if (counts[i] > 0)
+                {
+                    slope = (wsOut[lastPop] - wsOut[i]) / (float) (lastPop - i);
+                    break;
+                }
+            }
+            for (int i = lastPop + 1; i < kTableSize; ++i)
+                wsOut[i] = wsOut[lastPop] + slope * (float) (i - lastPop);
+        }
+    }
+
+    // Normalise small-signal slope to unity.
+    const int   center    = kTableSize / 2;
+    const float stepSize  = 2.0f / (float) (kTableSize - 1);
+    const int   window    = 8;
+    float       slopeSum  = 0.0f;
+    int         slopeCnt  = 0;
+    for (int d = 1; d <= window; ++d)
+    {
+        if (center - d >= 0 && center + d < kTableSize)
+        {
+            slopeSum += (wsOut[center + d] - wsOut[center - d])
+                        / (2.0f * (float) d * stepSize);
+            ++slopeCnt;
+        }
+    }
+    if (slopeCnt > 0)
+    {
+        const float slope = slopeSum / (float) slopeCnt;
+        if (std::abs (slope) > 1e-6f)
+            for (auto& v : wsOut) v /= slope;
     }
 }
 
@@ -465,110 +622,44 @@ void AnalysisEngine::analyseSineTone (const juce::AudioBuffer<float>& ref,
 //==============================================================================
 void AnalysisEngine::finaliseWaveshaper (LNLModel& model)
 {
-    model.waveshaper.resize (kTableSize);
+    finaliseWaveshaperInto (model.waveshaper, wsAccum, wsCounts);
+}
 
-    // Average each populated bin.
-    for (int i = 0; i < kTableSize; ++i)
+//==============================================================================
+// Build model.gainModels from per-gain-label accumulators.
+// Each gain label becomes one GainModel with a separately finalised waveshaper.
+// Models are sorted by the numeric value parsed from the gain label
+// (e.g. "25%" → 25, "75%" → 75) and gainValue is normalised 0…1.
+//==============================================================================
+void AnalysisEngine::populateGainModels (LNLModel& model)
+{
+    if (perGainWsAccum.empty())
+        return;
+
+    // Collect labels and their parsed numeric values for sorting.
+    std::vector<std::pair<float, juce::String>> sortable;
+    for (const auto& [label, _] : perGainWsAccum)
     {
-        if (wsCounts[i] > 0)
-            model.waveshaper[i] = wsAccum[i] / (float) wsCounts[i];
-        else
-            model.waveshaper[i] = -1.0f + 2.0f * (float) i / (float) (kTableSize - 1);  // identity
+        const float v = label.trimCharactersAtEnd ("%").getFloatValue();
+        sortable.emplace_back (v, label);
     }
+    std::sort (sortable.begin(), sortable.end(),
+               [] (const auto& a, const auto& b) { return a.first < b.first; });
 
-    // Fill any un-hit bins by linear interpolation between neighbours.
-    for (int i = 1; i < kTableSize - 1; ++i)
+    const int N = (int) sortable.size();
+    model.gainModels.clear();
+    model.gainModels.reserve (N);
+
+    for (int idx = 0; idx < N; ++idx)
     {
-        if (wsCounts[i] == 0)
-        {
-            int j = i + 1;
-            while (j < kTableSize - 1 && wsCounts[j] == 0) ++j;
-
-            if (wsCounts[i - 1] > 0 && wsCounts[j] > 0)
-            {
-                const float y0 = model.waveshaper[i - 1];
-                const float y1 = model.waveshaper[j];
-                const int   span = j - (i - 1);
-                for (int k = i; k < j; ++k)
-                {
-                    const float t = (float) (k - (i - 1)) / (float) span;
-                    model.waveshaper[k] = y0 * (1.0f - t) + y1 * t;
-                }
-                i = j - 1;
-            }
-        }
-    }
-
-    // For extreme bins that were never populated (the sine didn't reach ±1.0),
-    // extrapolate linearly using the slope measured at the edge of the populated
-    // region.  Using the identity line instead would create an inverted segment
-    // after slope normalisation for phase-inverting devices (like transformers
-    // wired with reversed secondary), causing a massive gain drop at high drive.
-    {
-        int firstPop = -1, lastPop = -1;
-        for (int i = 0; i < kTableSize; ++i)
-            if (wsCounts[i] > 0) { if (firstPop < 0) firstPop = i; lastPop = i; }
-
-        if (firstPop > 0)
-        {
-            // Estimate slope from first few populated bins.
-            float slope = -1.0f;  // safe default: inverted device
-            for (int i = firstPop + 1; i <= std::min (firstPop + 8, kTableSize - 1); ++i)
-            {
-                if (wsCounts[i] > 0)
-                {
-                    slope = (model.waveshaper[i] - model.waveshaper[firstPop])
-                            / (float) (i - firstPop);
-                    break;
-                }
-            }
-            for (int i = 0; i < firstPop; ++i)
-                model.waveshaper[i] = model.waveshaper[firstPop]
-                                      + slope * (float) (i - firstPop);
-        }
-
-        if (lastPop >= 0 && lastPop < kTableSize - 1)
-        {
-            // Estimate slope from last few populated bins.
-            float slope = -1.0f;  // safe default: inverted device
-            for (int i = lastPop - 1; i >= std::max (lastPop - 8, 0); --i)
-            {
-                if (wsCounts[i] > 0)
-                {
-                    slope = (model.waveshaper[lastPop] - model.waveshaper[i])
-                            / (float) (lastPop - i);
-                    break;
-                }
-            }
-            for (int i = lastPop + 1; i < kTableSize; ++i)
-                model.waveshaper[i] = model.waveshaper[lastPop]
-                                      + slope * (float) (i - lastPop);
-        }
-    }
-
-    // Normalise small-signal slope to unity so the plugin applies only the
-    // nonlinear character, not the recording chain's absolute gain level.
-    // Estimate slope from a small window around x=0 (table centre).
-    const int   center   = kTableSize / 2;
-    const float stepSize = 2.0f / (float) (kTableSize - 1);
-    const int   window   = 8;
-    float slopeSum = 0.0f;
-    int   slopeCount = 0;
-    for (int d = 1; d <= window; ++d)
-    {
-        if (center - d >= 0 && center + d < kTableSize)
-        {
-            slopeSum += (model.waveshaper[center + d] - model.waveshaper[center - d])
-                        / (2.0f * (float) d * stepSize);
-            ++slopeCount;
-        }
-    }
-
-    if (slopeCount > 0)
-    {
-        const float slope = slopeSum / (float) slopeCount;
-        if (std::abs (slope) > 1e-6f)
-            for (auto& v : model.waveshaper) v /= slope;
+        const juce::String& label  = sortable[idx].second;
+        GainModel gm;
+        gm.gainLabel  = label;
+        gm.gainValue  = (N > 1) ? (float) idx / (float) (N - 1) : 0.5f;
+        finaliseWaveshaperInto (gm.waveshaper,
+                                perGainWsAccum .at (label),
+                                perGainWsCounts.at (label));
+        model.gainModels.push_back (std::move (gm));
     }
 }
 

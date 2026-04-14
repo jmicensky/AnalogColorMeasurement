@@ -55,6 +55,12 @@ float AudioEngine::getReturnPeakDb() const
     return (p > 0.0f) ? 20.0f * std::log10 (p) : -100.0f;
 }
 
+float AudioEngine::getReturnRmsDb() const
+{
+    const float r = returnRmsLinear.load();
+    return (r > 0.0f) ? 20.0f * std::log10 (r) : -100.0f;
+}
+
 //==============================================================================
 juce::String AudioEngine::loadReferenceFile (const juce::File& file)
 {
@@ -229,6 +235,16 @@ void AudioEngine::audioDeviceIOCallbackWithContext (
             for (int n = 0; n < numSamples; ++n)
                 peak = std::max (peak, std::abs (inputChannelData[meterCh][n]));
         returnPeakLinear.store (peak);
+
+        // RMS: leaky integrator over squared samples (~300ms time constant)
+        float sumSq = 0.0f;
+        if (meterCh >= 0 && meterCh < numInputChannels && inputChannelData[meterCh] != nullptr)
+            for (int n = 0; n < numSamples; ++n)
+                sumSq += inputChannelData[meterCh][n] * inputChannelData[meterCh][n];
+        const float blockMeanSq = (numSamples > 0) ? (sumSq / (float) numSamples) : 0.0f;
+        // alpha ≈ 0.95 at 512/48kHz ≈ 10ms per block → ~200ms effective window
+        rmsAccum = 0.95f * rmsAccum + 0.05f * blockMeanSq;
+        returnRmsLinear.store (std::sqrt (rmsAccum));
     }
 
     // --- Capture: write to refBuffer and recBuffer ---
