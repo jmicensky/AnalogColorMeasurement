@@ -4,7 +4,8 @@
 #include "../Source/SpectrumDisplay.h"
 
 class HardwareColorEditor : public juce::AudioProcessorEditor,
-                             private juce::Button::Listener
+                             private juce::Button::Listener,
+                             private juce::Timer
 {
 public:
     explicit HardwareColorEditor (HardwareColorProcessor&);
@@ -15,7 +16,10 @@ public:
 
 private:
     void buttonClicked (juce::Button*) override;
+    void timerCallback() override;
     void updateModelLabel();
+
+    bool lastModelState { false };
 
     HardwareColorProcessor& processor;
 

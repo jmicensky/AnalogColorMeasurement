@@ -54,12 +54,11 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 {
     currentSampleRate = sampleRate;
 
-    // If the DAW sample rate differs from the model's capture rate, the FIR tap
-    // values are misaligned — all frequencies shift by captureRate/playbackRate.
-    // Redesign the FIR from the stored frequency-response data at the actual rate.
-    if (model.isValid()
-        && ! model.frFrequencies.empty()
-        && std::abs (sampleRate - model.sampleRate) > 1.0)
+    // Always rebuild the FIR from stored frequency-response data at the current
+    // sample rate.  This ensures the correct (odd) tap count and the latest
+    // design improvements (taper, regularisation) are applied regardless of
+    // what tap count was saved in the artifact.
+    if (model.isValid() && ! model.frFrequencies.empty())
     {
         model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
                           model.frFrequencies, model.frMagnitudeDb, sampleRate);
@@ -328,14 +327,13 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
 
     model = std::move (newModel);
 
-    // If prepareToPlay has already run and its rate differs from the model's
-    // capture rate, rebuild the FIR at the playback rate immediately.
-    if (currentSampleRate > 0.0
-        && ! model.frFrequencies.empty()
-        && std::abs (currentSampleRate - model.sampleRate) > 1.0)
+    // Always rebuild the FIR so the correct odd tap count and latest design
+    // improvements are applied regardless of what was saved in the artifact.
+    if (! model.frFrequencies.empty())
     {
+        const double rate = (currentSampleRate > 0.0) ? currentSampleRate : model.sampleRate;
         model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
-                          model.frFrequencies, model.frMagnitudeDb, currentSampleRate);
+                          model.frFrequencies, model.frMagnitudeDb, rate);
     }
 
     // Reset FIR and dry-delay histories for all channels.

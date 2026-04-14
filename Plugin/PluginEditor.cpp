@@ -34,12 +34,14 @@ HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
     addAndMakeVisible (spectrumDisplay);
 
     updateModelLabel();
+    startTimerHz (10);   // poll for model changes — ensures repaint in all hosts
 
     setSize (500, 520);
 }
 
 HardwareColorEditor::~HardwareColorEditor()
 {
+    stopTimer();
     loadButton.removeListener (this);
 }
 
@@ -66,6 +68,22 @@ void HardwareColorEditor::buttonClicked (juce::Button* btn)
                     juce::MessageBoxIconType::WarningIcon, "Load failed", err);
             updateModelLabel();
         });
+}
+
+void HardwareColorEditor::timerCallback()
+{
+    // Refresh the spectrum display at 10 Hz.  Calling repaint() directly from a
+    // button callback can be silently dropped by some plugin hosts; a timer
+    // guarantees the host processes the paint request.
+    const bool hasModel = processor.hasModel();
+    if (hasModel != lastModelState)
+    {
+        lastModelState = hasModel;
+        updateModelLabel();
+    }
+
+    if (hasModel)
+        spectrumDisplay.repaint();
 }
 
 void HardwareColorEditor::updateModelLabel()

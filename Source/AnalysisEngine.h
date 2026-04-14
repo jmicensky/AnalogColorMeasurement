@@ -23,7 +23,7 @@ public:
         const std::vector<float>& frFreqHz,
         const std::vector<float>& frMagDb,
         double targetSampleRate,
-        int numTaps = 128);
+        int numTaps = 127);
 
     // FFT size used for FIR design — public so the plugin can reference it.
     static constexpr int kDesignN = 4096;
@@ -43,7 +43,7 @@ private:
     // magnitude array (kDesignN/2 + 1 entries).
     static std::vector<float> designLinearPhaseFIR (
         const std::vector<float>& hMag,
-        int numTaps = 128);
+        int numTaps = 127);
 
     // 1/3-octave smoothing of a half-spectrum magnitude array.
     static void smoothMagnitude (std::vector<float>& hMag, double sampleRate);
