@@ -58,7 +58,7 @@ target_compile_definitions(HardwareProfiler PRIVATE
 # =============================================================================
 juce_add_plugin(HardwareColor
     PRODUCT_NAME     "Hardware Color"
-    VERSION          "1.0.0"
+    VERSION          "1.1.0"
     PLUGIN_MANUFACTURER_CODE Jmce
     PLUGIN_CODE      HdCl
     FORMATS          VST3 AU
