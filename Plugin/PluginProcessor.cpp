@@ -82,11 +82,6 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     // Overlap-save FFT convolution setup.
     setupOverlapSave (numCh, samplesPerBlock);
 
-    // One-pole LP at 15 kHz applied to the wet path to tame transient peaks.
-    // Coefficient: α = exp(-2π * fc / sr)
-    lpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 15000.0f / (float) sampleRate);
-    lpState.assign (numCh, 0.0f);
-
     // Weight tilt: one-pole LP at 800 Hz splits the wet signal into LF and HF
     // bands. Weight 0.5 = flat; <0.5 blends toward LF; >0.5 blends toward HF.
     weightLpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 800.0f / (float) sampleRate);
@@ -173,16 +168,6 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 applyFIR_OLS (data, numSamples, olsOverlap[ch]);
             else
                 applyFIR (data, numSamples, firHistory[ch], firHistoryWritePos[ch]);
-        }
-
-        // --- LP at 15 kHz: tame transient peaks on the wet path ---
-        {
-            float& s = lpState[ch];
-            for (int n = 0; n < numSamples; ++n)
-            {
-                s      = (1.0f - lpAlpha) * data[n] + lpAlpha * s;
-                data[n] = s;
-            }
         }
 
         // --- Weight high-shelf tilt ---

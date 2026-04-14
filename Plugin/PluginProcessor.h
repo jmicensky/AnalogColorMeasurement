@@ -87,10 +87,6 @@ private:
     std::vector<int>                dryDelayWritePos;
     int                             dryGroupDelay { 0 };
 
-    // One-pole LP at 15 kHz applied to the wet path.
-    float lpAlpha { 0.0f };
-    std::vector<float> lpState;
-
     // Weight high-shelf: one-pole LP at 800 Hz, ±6 dB shelf gain.
     // weight=0.5 → hardware-accurate; <0.5 → darker; >0.5 → brighter.
     float weightLpAlpha { 0.0f };
