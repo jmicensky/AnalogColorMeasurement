@@ -44,7 +44,7 @@ HardwareColorProcessor::createParameterLayout()
         juce::ParameterID { "outputGain", 1 },
         "Output",
         juce::NormalisableRange<float> (-24.0f, 12.0f, 0.1f),
-        0.0f));
+        6.0f));
 
     return { params.begin(), params.end() };
 }
@@ -185,21 +185,22 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             }
         }
 
-        // --- Weight tilt EQ ---
-        // Splits the wet signal at 800 Hz into LF and HF bands, then blends:
-        //   weight=0.5 → flat (LF+HF = original)
-        //   weight<0.5 → LF saturation emphasis
-        //   weight>0.5 → HF saturation emphasis
-        // The ×2 factor ensures unity gain at weight=0.5.
+        // --- Weight high-shelf tilt ---
+        // One-pole LP at 800 Hz isolates the HF band.  The shelf gain is
+        // derived from weight so that all positions are full-spectrum:
+        //   weight=0.5 → shelfGain=1.0 → hardware-accurate (no tilt)
+        //   weight<0.5 → shelfGain<1.0 → HF cut, darker character
+        //   weight>0.5 → shelfGain>1.0 → HF boost, brighter character
+        // ±6 dB at the extremes keeps the range musical without sounding wrong.
         if ((int) weightLpState.size() != numChannels)
             weightLpState.assign (numChannels, 0.0f);
         {
+            const float shelfGain = std::pow (10.0f, (weight - 0.5f) * 0.6f);  // ±6 dB
             float& lpS = weightLpState[ch];
             for (int n = 0; n < numSamples; ++n)
             {
                 lpS = (1.0f - weightLpAlpha) * data[n] + weightLpAlpha * lpS;
-                const float hpWet = data[n] - lpS;
-                data[n] = 2.0f * ((1.0f - weight) * lpS + weight * hpWet);
+                data[n] = lpS + shelfGain * (data[n] - lpS);
             }
         }
 
