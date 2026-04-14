@@ -1,6 +1,11 @@
 #include "SpectrumDisplay.h"
 
-SpectrumDisplay::SpectrumDisplay() = default;
+SpectrumDisplay::SpectrumDisplay()
+{
+    // Mark opaque so plugin hosts don't try to composite the parent background
+    // behind this component — it paints every pixel itself via fillAll.
+    setOpaque (true);
+}
 
 void SpectrumDisplay::setData (const std::vector<float>& freqHz,
                                 const std::vector<float>& magDb)
