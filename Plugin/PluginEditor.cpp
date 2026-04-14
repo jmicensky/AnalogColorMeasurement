@@ -35,7 +35,7 @@ HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
 
     updateModelLabel();
 
-    setSize (500, 460);
+    setSize (500, 520);
 }
 
 HardwareColorEditor::~HardwareColorEditor()

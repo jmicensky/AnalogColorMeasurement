@@ -17,19 +17,19 @@ HardwareColorProcessor::createParameterLayout()
 {
     std::vector<std::unique_ptr<juce::RangedAudioParameter>> params;
 
-    // Logarithmic skew (0.5) maps the knob's 50% position to Drive = 1.0 (unity).
-    // The upper half of the knob then covers 1.0–4.0 for heavy saturation,
-    // giving fine control in the subtle range without sacrificing headroom.
+    // Logarithmic skew (0.5) maps the knob's 50% position to Drive = 2.0.
+    // The lower half covers 0–2.0 with fine resolution for subtle saturation;
+    // the upper half pushes into heavy drive up to 10.0.
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "drive", 1 },
         "Drive",
-        juce::NormalisableRange<float> (0.0f, 4.0f, 0.01f, 0.5f),
+        juce::NormalisableRange<float> (0.0f, 10.0f, 0.01f, 0.5f),
         1.0f));
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
         juce::ParameterID { "weight", 1 },
         "Weight",
-        juce::NormalisableRange<float> (0.0f, 2.0f, 0.01f),
+        juce::NormalisableRange<float> (0.0f, 6.0f, 0.01f),
         1.0f));
 
     params.push_back (std::make_unique<juce::AudioParameterFloat> (
