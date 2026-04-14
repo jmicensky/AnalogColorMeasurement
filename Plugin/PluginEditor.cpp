@@ -110,6 +110,13 @@ void HardwareColorEditor::resized()
     // Title row: top 36 px (painted, not a component).
     int y = 44;
 
+    // Spectrum display — full plugin width, between title and knobs.
+    // Height fills the space not taken by knobs + load row at the bottom.
+    const int bottomRowH = knobH + labelH + margin + btnH + margin;
+    const int specH      = getHeight() - y - margin - bottomRowH;
+    spectrumDisplay.setBounds (margin, y, getWidth() - margin * 2, specH);
+    y += specH + margin;
+
     // Knobs row.
     for (auto [slider, label, col] :
          std::initializer_list<std::tuple<juce::Slider*, juce::Label*, int>>
@@ -127,8 +134,4 @@ void HardwareColorEditor::resized()
     // Load button + model label.
     loadButton .setBounds (margin, y, 120, btnH);
     modelLabel .setBounds (margin + 128, y, getWidth() - margin * 2 - 128, btnH);
-    y += btnH + margin;
-
-    // Spectrum display.
-    spectrumDisplay.setBounds (margin, y, getWidth() - margin * 2, getHeight() - y - margin);
 }
