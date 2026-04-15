@@ -1,3 +1,6 @@
+// Plugin editor UI providing Drive, Weight, Mix, and Output knobs alongside a frequency-response spectrum display and model-load button.
+// The spectrum curve updates in real time as the Weight knob moves, showing the combined hardware FR plus the active tilt EQ shape.
+
 #include "PluginEditor.h"
 
 HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
@@ -26,11 +29,13 @@ HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
     loadButton.addListener (this);
     addAndMakeVisible (loadButton);
 
+
     modelLabel.setJustificationType (juce::Justification::centredLeft);
     modelLabel.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
     addAndMakeVisible (modelLabel);
 
     // --- Spectrum display ---
+    spectrumDisplay.setShowSetupHints (false);
     addAndMakeVisible (spectrumDisplay);
 
     updateModelLabel();
@@ -230,6 +235,6 @@ void HardwareColorEditor::resized()
     y += knobH + labelH + margin;
 
     // Load button + model label.
-    loadButton .setBounds (margin, y, 120, btnH);
-    modelLabel .setBounds (margin + 128, y, getWidth() - margin * 2 - 128, btnH);
+    loadButton.setBounds (margin,       y, 120, btnH);
+    modelLabel.setBounds (margin + 128, y, getWidth() - margin * 2 - 128, btnH);
 }

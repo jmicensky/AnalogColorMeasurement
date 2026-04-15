@@ -1,3 +1,6 @@
+// Measures round-trip hardware latency by FFT cross-correlation of the reference and recorded signals.
+// Removes the integer-sample delay via buffer shift and the sub-sample remainder via 4-point Lagrange interpolation.
+
 #include "LatencyAligner.h"
 
 float LatencyAligner::findLatencySamples (const juce::AudioBuffer<float>& ref,

@@ -1,3 +1,6 @@
+// Creates and manages the project folder structure on disk, providing per-step WAV file paths.
+// Writes session.json (routing, sample rate, step list) and markers.json after each completed capture.
+
 #include "SessionWriter.h"
 
 juce::String SessionWriter::initialise (const juce::String& name,

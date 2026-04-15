@@ -34,6 +34,12 @@ struct LNLModel
     juce::String date;
     double       sampleRate { 44100.0 };
 
+    // Input pad applied automatically by the plugin before the waveshaper.
+    // Set at analysis time based on the device's expected operating level.
+    // 0.0 = line level (no pad).  -18.0 = instrument level (-18 dB pad).
+    // Defaults to 0.0 so existing artifacts load without any level change.
+    float inputPadDb { 0.0f };
+
     // Input filter.  512 taps, linear-phase, designed from measured FR.
     // Contains a single [1.0] entry (identity) when no sweep was analysed.
     std::vector<float> l1Fir;

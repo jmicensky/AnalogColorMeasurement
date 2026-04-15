@@ -1,3 +1,6 @@
+// Draws a vertical peak-hold / RMS bar meter with a green-to-red gradient and dB tick marks.
+// Peak hold freezes for 1.5 s then decays at 0.5 dB per tick; updated at 10 Hz from the audio thread's leaky-integrator RMS.
+
 #include "LevelMeter.h"
 
 LevelMeter::LevelMeter()

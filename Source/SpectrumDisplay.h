@@ -11,9 +11,14 @@ public:
     SpectrumDisplay();
 
     // Set (or clear) the FR curve.  Vectors must be the same length.
-    // Pass empty vectors to show "No model loaded."
+    // Pass empty vectors to show the placeholder / setup hints overlay.
     void setData (const std::vector<float>& freqHz,
                   const std::vector<float>& magDb);
+
+    // When true, the empty-state overlay shows setup instructions instead of
+    // a plain "no model" message.  Enable in the profiler app; leave false in
+    // the plugin editor.  Automatically hidden once real data is supplied.
+    void setShowSetupHints (bool show);
 
     void paint (juce::Graphics&) override;
 
@@ -26,6 +31,7 @@ private:
 
     std::vector<float> freqs;
     std::vector<float> mags;
+    bool showSetupHints { false };
 
     static constexpr float kMinFreq  =   20.0f;
     static constexpr float kMaxFreq  = 20000.0f;

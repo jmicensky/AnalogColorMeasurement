@@ -8,6 +8,7 @@
 #include "LevelMeter.h"
 
 class MainComponent : public juce::Component,
+                      public juce::MenuBarModel,
                       private juce::Timer
 {
 public:
@@ -55,9 +56,25 @@ private:
         }
     };
 
+    // ComboBox subclass that ignores mouse-wheel events so trackpad scroll
+    // cannot accidentally change a routing selection.
+    struct FixedComboBox : public juce::ComboBox
+    {
+        using juce::ComboBox::ComboBox;
+        void mouseWheelMove (const juce::MouseEvent&,
+                             const juce::MouseWheelDetails&) override {}
+    };
+
+    // MenuBarModel
+    juce::StringArray getMenuBarNames() override { return {}; }
+    juce::PopupMenu   getMenuForIndex (int, const juce::String&) override { return {}; }
+    void              menuItemSelected (int menuItemID, int) override;
+
     void populateRoutingCombos();
     void populateProjectCombo();
-    void checkRoutingSafety (juce::ComboBox* changed);
+    void checkRoutingSafety (FixedComboBox* changed);
+    void lockRouting();    // disable routing controls after first measurement
+    void unlockRouting();  // re-enable routing controls when project changes
     void onProjectComboChanged();
     void onInitProjectClicked();
     void onBuildPlanClicked();
@@ -79,8 +96,9 @@ private:
 
     // --- Mode selector ---
     juce::Label modeLabel;
-    juce::TextButton saturationModeButton { "Saturation" };
-    juce::TextButton compressorModeButton { "Compressor" };
+    juce::TextButton saturationModeButton  { "Saturation" };
+    juce::TextButton compressorModeButton  { "Compressor" };
+    juce::ToggleButton instrumentLevelToggle { "Instrument Level (-18 dB)" };
 
     // --- Capture quality selector ---
     juce::Label      qualityLabel  { {}, "Capture Quality:" };
@@ -90,14 +108,13 @@ private:
     CaptureQuality   captureQuality { CaptureQuality::Standard };
 
     // --- Routing selector ---
-    juce::Label      routingLabel;
-    juce::TextButton audioSettingsButton { "Audio Settings..." };
+    juce::Label routingLabel;
     juce::Label sendLabel       { {}, "Send Output Pair:" };
     juce::Label returnLabel     { {}, "Return Input Pair:" };
     juce::Label monitorLabel    { {}, "Monitor Output Pair:" };
-    juce::ComboBox sendCombo;
-    juce::ComboBox returnCombo;
-    juce::ComboBox monitorCombo;
+    FixedComboBox sendCombo;
+    FixedComboBox returnCombo;
+    FixedComboBox monitorCombo;
     juce::ToggleButton monoModeToggle { "Mono device (single channel)" };
 
     // --- Measurement control ---
@@ -129,6 +146,10 @@ private:
     AudioEngine              audioEngine;
     StimulusPlan             stimulusPlan;
     juce::Array<MarkerEntry> markers;
+
+    // True once the first measurement has started for the current project.
+    // Routing controls are locked until a new/different project is opened.
+    bool routingLocked { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (MainComponent)
 };

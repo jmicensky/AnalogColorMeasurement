@@ -1,3 +1,6 @@
+// Serializes and deserializes an LNLModel to/from a pretty-printed JSON artifact file.
+// Handles both single-model (legacy) and multi-model (gainModels array) artifact formats for backward compatibility.
+
 #include "ArtifactFile.h"
 
 //==============================================================================
@@ -32,6 +35,7 @@ juce::String ArtifactFile::save (const LNLModel& model, const juce::File& file)
     root->setProperty ("deviceName", model.deviceName);
     root->setProperty ("date",       model.date);
     root->setProperty ("sampleRate", model.sampleRate);
+    root->setProperty ("inputPadDb", (double) model.inputPadDb);
     root->setProperty ("l1Fir",      vecToVar (model.l1Fir));
     root->setProperty ("l2Fir",      vecToVar (model.l2Fir));
     root->setProperty ("waveshaper", vecToVar (model.waveshaper));
@@ -88,6 +92,9 @@ juce::String ArtifactFile::load (const juce::File& file, LNLModel& model)
     model.deviceName = parsed["deviceName"].toString();
     model.date       = parsed["date"].toString();
     model.sampleRate = (double) parsed["sampleRate"];
+    // Default 0.0 preserves existing behaviour for artifacts that pre-date this field.
+    model.inputPadDb = parsed.hasProperty ("inputPadDb")
+                           ? (float)(double) parsed["inputPadDb"] : 0.0f;
     model.l1Fir      = varToVec (parsed["l1Fir"]);
     model.l2Fir      = varToVec (parsed["l2Fir"]);
     model.waveshaper = varToVec (parsed["waveshaper"]);

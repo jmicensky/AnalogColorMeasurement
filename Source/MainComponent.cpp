@@ -1,3 +1,6 @@
+// Central UI component for the Hardware Profiler app, wiring together project setup,
+// audio routing, stimulus plan execution, level metering, spectrum display, and analysis trigger.
+
 #include "MainComponent.h"
 #include "SignalGenerator.h"
 #include "AnalysisEngine.h"
@@ -37,6 +40,8 @@ MainComponent::MainComponent()
     compressorModeButton.setClickingTogglesState (true);
     addAndMakeVisible (compressorModeButton);
 
+    addAndMakeVisible (instrumentLevelToggle);
+
     // --- Capture quality selector ---
     qualityLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (qualityLabel);
@@ -65,9 +70,6 @@ MainComponent::MainComponent()
     meterTimer.startTimer (100);
 
     // --- Routing selector ---
-    audioSettingsButton.onClick = [this] { onAudioSettingsClicked(); };
-    addAndMakeVisible (audioSettingsButton);
-
     routingLabel.setText ("Audio Routing", juce::dontSendNotification);
     routingLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (routingLabel);
@@ -88,11 +90,9 @@ MainComponent::MainComponent()
     monoModeToggle.setToggleState (false, juce::dontSendNotification);
     monoModeToggle.onStateChange = [this]
     {
-        const bool mono = monoModeToggle.getToggleState();
-        audioEngine.setMonoMode (mono);
-        // In mono mode the monitor pair is unused — disable it.
-        monitorCombo.setEnabled (! mono);
-        monitorLabel.setEnabled (! mono);
+        audioEngine.setMonoMode (monoModeToggle.getToggleState());
+        // Repopulate combos so they show individual channels (mono) or pairs (stereo).
+        populateRoutingCombos();
     };
     addAndMakeVisible (monoModeToggle);
 
@@ -126,6 +126,7 @@ MainComponent::MainComponent()
 
     // --- Spectrum display ---
     addAndMakeVisible (spectrumDisplay);
+    spectrumDisplay.setShowSetupHints (true);
 
     // --- Status bar ---
     statusLabel.setText (audioEngine.getDeviceStatusString() + "  |  No project initialized.",
@@ -133,10 +134,19 @@ MainComponent::MainComponent()
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
 
+    // Register this component as the macOS menu bar model.
+    // "Audio Device Settings..." appears under the app name in the menu bar.
+    juce::PopupMenu appleExtras;
+    appleExtras.addItem (1, "Audio Device Settings...");
+    juce::MenuBarModel::setMacMainMenu (this, &appleExtras);
+
     setSize (1200, 720);
 }
 
-MainComponent::~MainComponent() {}
+MainComponent::~MainComponent()
+{
+    juce::MenuBarModel::setMacMainMenu (nullptr);
+}
 
 //==============================================================================
 juce::String MainComponent::loadStimulusByName (const juce::String& name)
@@ -229,7 +239,11 @@ void MainComponent::onProjectComboChanged()
     resized();   // reflow layout to reclaim / restore the editor row
 
     if (isNew)
+    {
+        // User is setting up a new project — unlock routing so they can configure it.
+        unlockRouting();
         return;
+    }
 
     // Existing project selected — auto-initialise.
     const juce::String name = projectCombo.getItemText (projectCombo.indexOfItemId (id));
@@ -248,6 +262,10 @@ void MainComponent::onProjectComboChanged()
         statusLabel.setText ("ERROR opening project: " + err, juce::dontSendNotification);
         return;
     }
+
+    // Unlock routing so the user can set up channels for this project.
+    unlockRouting();
+    markers.clear();
 
     statusLabel.setText ("Opened project: "
                          + sessionWriter.getProjectFolder().getFullPathName(),
@@ -295,6 +313,12 @@ void MainComponent::onInitProjectClicked()
     projectNameEditor.setVisible (false);
     initProjectButton.setVisible (false);
     resized();
+
+    // New project — unlock routing so the user can configure channels.
+    unlockRouting();
+    markers.clear();
+    stimulusPlan = StimulusPlan{};
+    planList.updateContent();
 
     statusLabel.setText ("Project initialized: "
                          + sessionWriter.getProjectFolder().getFullPathName(),
@@ -380,6 +404,8 @@ void MainComponent::onAnalyseClicked()
     statusLabel.setText ("Analyzing captures...", juce::dontSendNotification);
 
     LNLModel model;
+    model.inputPadDb = instrumentLevelToggle.getToggleState() ? -18.0f : 0.0f;
+
     const juce::String err = AnalysisEngine::analyseProjectFolder (
         sessionWriter.getProjectFolder(),
         sessionWriter.getProjectName(),
@@ -412,6 +438,12 @@ void MainComponent::onAnalyseClicked()
         + "  |  FR bins: "     + juce::String ((int) model.frFrequencies.size())
         + "  |  Waveshaper: "  + juce::String ((int) model.waveshaper.size()) + " pts";
     statusLabel.setText (summary, juce::dontSendNotification);
+}
+
+void MainComponent::menuItemSelected (int menuItemID, int)
+{
+    if (menuItemID == 1)
+        onAudioSettingsClicked();
 }
 
 void MainComponent::onAudioSettingsClicked()
@@ -452,9 +484,7 @@ void MainComponent::timerCallback()
     if (! audioEngine.isFinished())
         return;
 
-    stopTimer();
-    measureButton.setToggleState (false, juce::dontSendNotification);
-    measureButton.setButtonText ("Start Measurement");
+    stopTimer();  // always stop first; restarted below if auto-advancing within a gain level
 
     // --- Plan-driven path ---
     if (! stimulusPlan.isEmpty() && ! stimulusPlan.isComplete())
@@ -484,6 +514,8 @@ void MainComponent::timerCallback()
         auto err = audioEngine.writeSession (refPath, recPath);
         if (err.isNotEmpty())
         {
+            measureButton.setToggleState (false, juce::dontSendNotification);
+            measureButton.setButtonText ("Start Measurement");
             statusLabel.setText ("ERROR writing session: " + err, juce::dontSendNotification);
             return;
         }
@@ -504,19 +536,50 @@ void MainComponent::timerCallback()
         planList.repaint();
 
         // Write metadata after every completed step so nothing is lost on abort.
-        auto* device    = audioEngine.getDeviceManager().getCurrentAudioDevice();
-        const float sr  = device ? (float) device->getCurrentSampleRate() : 44100.0f;
-        const bool monoTimer = monoModeToggle.getToggleState();
-        const int sendCh    = monoTimer ? (sendCombo.getSelectedId() - 2)
-                                        : (sendCombo.getSelectedId() - 2) * 2;
-        const int returnCh  = monoTimer ? (returnCombo.getSelectedId() - 2)
-                                        : (returnCombo.getSelectedId() - 2) * 2;
-        const int monitorCh = (monoTimer || monitorCombo.getSelectedId() == 1)
+        auto* device     = audioEngine.getDeviceManager().getCurrentAudioDevice();
+        const float sr   = device ? (float) device->getCurrentSampleRate() : 44100.0f;
+        const bool monoT = monoModeToggle.getToggleState();
+        const int sendCh    = monoT ? (sendCombo.getSelectedId() - 2)
+                                    : (sendCombo.getSelectedId() - 2) * 2;
+        const int returnCh  = monoT ? (returnCombo.getSelectedId() - 2)
+                                    : (returnCombo.getSelectedId() - 2) * 2;
+        const int monitorCh = (monoT || monitorCombo.getSelectedId() == 1)
                                   ? -1
                                   : (monitorCombo.getSelectedId() - 2) * 2;
 
         sessionWriter.writeSessionJson (stimulusPlan.getSteps(), sr, sendCh, returnCh, monitorCh, (int) lag);
         sessionWriter.writeMarkersJson (markers);
+
+        // --- Auto-advance within the same gain level ---
+        // If the next step shares the same gain label, load its stimulus and
+        // restart immediately without requiring the user to press Start again.
+        if (! stimulusPlan.isComplete()
+            && stimulusPlan.getCurrentStep()->gainLabel == step.gainLabel)
+        {
+            const auto* next = stimulusPlan.getCurrentStep();
+            const juce::String loadErr = loadStimulusByName (next->stimulusName);
+            if (loadErr.isEmpty())
+            {
+                audioEngine.startMeasurement();
+                startTimer (100);
+                // Keep button in active state so the user can still abort.
+                measureButton.setToggleState (true, juce::dontSendNotification);
+                measureButton.setButtonText ("Stop Measurement");
+                statusLabel.setText ("Auto: ["
+                                     + juce::String (stimulusPlan.currentStepIndex() + 1)
+                                     + " / "
+                                     + juce::String (stimulusPlan.totalSteps())
+                                     + "]  \""
+                                     + next->gainLabel + "\"  \xe2\x80\x94  " + next->stimulusName,
+                                     juce::dontSendNotification);
+                return;
+            }
+            // Fall through to stop state if stimulus failed to load.
+        }
+
+        // --- Gain level complete — stop and wait for user ---
+        measureButton.setToggleState (false, juce::dontSendNotification);
+        measureButton.setButtonText ("Start Measurement");
 
         if (stimulusPlan.isComplete())
         {
@@ -529,12 +592,11 @@ void MainComponent::timerCallback()
         else
         {
             const auto* next = stimulusPlan.getCurrentStep();
-            statusLabel.setText ("Step "
-                                 + juce::String (stimulusPlan.currentStepIndex())
-                                 + " / "
-                                 + juce::String (stimulusPlan.totalSteps())
-                                 + " saved.  Next: \""
-                                 + next->gainLabel + "\"  \xe2\x80\x94  " + next->stimulusName,
+            statusLabel.setText ("Gain level \""
+                                 + step.gainLabel
+                                 + "\" done.  Set hardware to \""
+                                 + next->gainLabel
+                                 + "\" then press Start Measurement.",
                                  juce::dontSendNotification);
         }
 
@@ -542,6 +604,9 @@ void MainComponent::timerCallback()
     }
 
     // --- Legacy single-capture path (no plan active) ---
+    measureButton.setToggleState (false, juce::dontSendNotification);
+    measureButton.setButtonText ("Start Measurement");
+
     const float lag = LatencyAligner::findLatencySamples (
         audioEngine.getReferenceBuffer(),
         audioEngine.getRecordBuffer(),
@@ -629,8 +694,9 @@ void MainComponent::onMeasureButtonClicked()
                               : (monitorCombo.getSelectedId() - 2) * 2;
 
     audioEngine.setSendChannelPair    (sendCh);
-    audioEngine.setReturnChannelPair  (returnCh);    // was missing in Week 2 — fixed
+    audioEngine.setReturnChannelPair  (returnCh);
     audioEngine.setMonitorChannelPair (monitorCh);
+    lockRouting();
     audioEngine.startMeasurement();
     startTimer (100);
 
@@ -655,9 +721,40 @@ void MainComponent::onMeasureButtonClicked()
     }
 }
 
+void MainComponent::lockRouting()
+{
+    routingLocked = true;
+    sendCombo    .setEnabled (false);
+    returnCombo  .setEnabled (false);
+    monitorCombo .setEnabled (false);
+    monoModeToggle.setEnabled (false);
+    sendLabel    .setEnabled (false);
+    returnLabel  .setEnabled (false);
+    monitorLabel .setEnabled (false);
+}
+
+void MainComponent::unlockRouting()
+{
+    routingLocked = false;
+    // Repopulate so channel options are fresh and selections reset to (not set),
+    // signalling to the user that routing needs to be confirmed for this project.
+    populateRoutingCombos();
+    // Ensure all controls are enabled (populateRoutingCombos handles monitor enable).
+    sendCombo    .setEnabled (true);
+    returnCombo  .setEnabled (true);
+    monoModeToggle.setEnabled (true);
+    sendLabel    .setEnabled (true);
+    returnLabel  .setEnabled (true);
+}
+
 //==============================================================================
 void MainComponent::populateRoutingCombos()
 {
+    // Snapshot current selections so we can restore them if routing is locked.
+    const int prevSendId    = sendCombo   .getSelectedId();
+    const int prevReturnId  = returnCombo .getSelectedId();
+    const int prevMonitorId = monitorCombo.getSelectedId();
+
     const bool mono = monoModeToggle.getToggleState();
 
     sendCombo   .clear (juce::dontSendNotification);
@@ -712,15 +809,26 @@ void MainComponent::populateRoutingCombos()
         }
     }
 
-    sendCombo   .setSelectedId (1);
-    returnCombo .setSelectedId (1);
-    monitorCombo.setSelectedId (1);
+    if (routingLocked)
+    {
+        // Routing is committed — restore previous selections (channel names may have
+        // changed if device was reconfigured, but indices stay the same).
+        if (prevSendId    > 1) sendCombo   .setSelectedId (prevSendId,    juce::dontSendNotification);
+        if (prevReturnId  > 1) returnCombo .setSelectedId (prevReturnId,  juce::dontSendNotification);
+        if (prevMonitorId > 1) monitorCombo.setSelectedId (prevMonitorId, juce::dontSendNotification);
+    }
+    else
+    {
+        sendCombo   .setSelectedId (1);
+        returnCombo .setSelectedId (1);
+        monitorCombo.setSelectedId (1);
+    }
 
-    monitorCombo.setEnabled (! mono);
-    monitorLabel.setEnabled (! mono);
+    monitorCombo.setEnabled (! mono && ! routingLocked);
+    monitorLabel.setEnabled (! mono && ! routingLocked);
 }
 
-void MainComponent::checkRoutingSafety (juce::ComboBox* changed)
+void MainComponent::checkRoutingSafety (FixedComboBox* changed)
 {
     const int sendId    = sendCombo   .getSelectedId();
     const int monitorId = monitorCombo.getSelectedId();
@@ -773,8 +881,9 @@ void MainComponent::resized()
     // --- Mode selector ---
     modeLabel.setBounds (margin, y, 200, 20);
     y += 22;
-    saturationModeButton.setBounds (margin,       y, 130, rowH);
-    compressorModeButton.setBounds (margin + 140, y, 130, rowH);
+    saturationModeButton  .setBounds (margin,       y, 130, rowH);
+    compressorModeButton  .setBounds (margin + 140, y, 130, rowH);
+    instrumentLevelToggle .setBounds (margin + 290, y, 200, rowH);
     y += rowH + 8;
 
     // --- Capture quality selector ---
@@ -785,8 +894,7 @@ void MainComponent::resized()
     y += rowH + margin + 6;
 
     // --- Routing selector ---
-    routingLabel       .setBounds (margin,                    y, 200, 20);
-    audioSettingsButton.setBounds (getWidth() - margin - 150, y, 150, 20);
+    routingLabel.setBounds (margin, y, 200, 20);
     y += 24;
     sendLabel  .setBounds (margin,          y, labelW, rowH);
     sendCombo  .setBounds (margin + labelW, y, 220,    rowH);
@@ -826,6 +934,7 @@ void MainComponent::resized()
 
     // --- Spectrum display (right column) ---
     spectrumDisplay.setBounds (rightX, 8, rightW, bottomY - 8);
+
 
     // --- Status bar ---
     statusLabel.setBounds (margin, getHeight() - 28, getWidth() - margin * 2, 24);

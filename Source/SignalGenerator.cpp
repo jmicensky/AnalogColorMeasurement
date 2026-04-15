@@ -1,3 +1,6 @@
+// Generates test stimuli (logarithmic sine sweep, pink noise, pure sine tones) as in-memory 24-bit WAV blocks.
+// All signals include 5 ms fade-in/out to prevent clicks when routed to hardware.
+
 #include "SignalGenerator.h"
 
 //==============================================================================

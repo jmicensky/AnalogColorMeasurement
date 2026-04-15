@@ -1,3 +1,6 @@
+// Offline analysis pipeline that builds the L-N-L gray-box model from captured ref/rec WAV pairs.
+// Estimates the L1 FIR via Wiener-filter averaging of sine sweeps, and fits per-gain-level waveshaper tables from sine-tone scatter for multi-model interpolation.
+
 #include "AnalysisEngine.h"
 
 // Static member definitions
@@ -13,9 +16,13 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
                                                      const juce::String& deviceName,
                                                      LNLModel& model)
 {
+    // Preserve caller-supplied fields before the full reset.
+    const float callerInputPadDb = model.inputPadDb;
+
     model = LNLModel{};
-    model.deviceName = deviceName;
-    model.date       = juce::Time::getCurrentTime().toISO8601 (true);
+    model.deviceName  = deviceName;
+    model.date        = juce::Time::getCurrentTime().toISO8601 (true);
+    model.inputPadDb  = callerInputPadDb;
     double detectedSR = 44100.0;   // updated from WAV file headers below
     bool   srDetected = false;
 
@@ -344,7 +351,11 @@ std::vector<float> AnalysisEngine::rebuildFirAtSampleRate (
         }
     }
 
-    return designLinearPhaseFIR (hMag, numTaps);
+    // Use minimum-phase design so the FIR has no pre-ringing.
+    // Analog hardware is inherently minimum-phase; a linear-phase FIR would
+    // smear transients backwards in time, causing audible artefacts on percussive
+    // material.  The minimum-phase FIR also reports near-zero latency to the host.
+    return designMinimumPhaseFIR (hMag, numTaps);
 }
 
 //==============================================================================
@@ -405,6 +416,95 @@ std::vector<float> AnalysisEngine::designLinearPhaseFIR (const std::vector<float
         const float hann = 0.5f * (1.0f - std::cos (
             juce::MathConstants<float>::twoPi * (float) i / (float) (numTaps - 1)));
         firCoeffs[i] = spectrum[n] * hann;
+    }
+
+    return firCoeffs;
+}
+
+//==============================================================================
+// Design a minimum-phase FIR from a half-spectrum magnitude (kDesignN/2+1 bins).
+// Cepstral method (Oppenheim & Schafer, "Discrete-Time Signal Processing" §12):
+//   1. log|H(ω)| → conjugate-symmetric spectrum → IFFT → real cepstrum c[n]
+//   2. Causal liftering: keep c[0], double c[1..N/2-1], keep c[N/2], zero c[N/2+1..]
+//   3. FFT → complex log-spectrum C[k]
+//   4. exp(C[k]) → minimum-phase spectrum H_min[k]
+//   5. IFFT → minimum-phase IR h_min[n]  (truncate to numTaps with tail fade)
+// Energy is concentrated at n=0 → no pre-ringing, group delay ≈ 0.
+//==============================================================================
+std::vector<float> AnalysisEngine::designMinimumPhaseFIR (const std::vector<float>& hMag,
+                                                           int numTaps)
+{
+    const int N = kDesignN;
+    juce::dsp::FFT fft (12);   // 2^12 = 4096
+
+    const int designBins = N / 2 + 1;
+
+    // Apply the same high-frequency taper as designLinearPhaseFIR.
+    const int taperStart = (int) (0.80f * (float) (designBins - 1));
+    const int taperEnd   = designBins - 1;
+    std::vector<float> hTapered (hMag);
+    for (int k = taperStart; k <= taperEnd; ++k)
+    {
+        const float t = (float) (k - taperStart) / (float) (taperEnd - taperStart);
+        hTapered[k] *= 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+    }
+
+    // --- Step 1: Build conjugate-symmetric log-magnitude spectrum (zero phase). ---
+    std::vector<float> spectrum (2 * N, 0.0f);
+    spectrum[0] = std::log (std::max (hTapered[0], 1e-6f));  spectrum[1] = 0.0f;
+    for (int k = 1; k < N / 2; ++k)
+    {
+        const float lm = std::log (std::max (hTapered[k], 1e-6f));
+        spectrum[2 * k]           = lm;  spectrum[2 * k + 1]           = 0.0f;
+        spectrum[2 * (N - k)]     = lm;  spectrum[2 * (N - k) + 1]     = 0.0f;
+    }
+    spectrum[N] = std::log (std::max (hTapered[N / 2], 1e-6f));  spectrum[N + 1] = 0.0f;
+
+    // --- Step 2: IFFT → real cepstrum c[n] in spectrum[0..N-1]. ---
+    fft.performRealOnlyInverseTransform (spectrum.data());
+
+    // --- Step 3: Causal liftering. ---
+    // n=0: unchanged (DC of log-mag), n=1..N/2-1: doubled (fold negative-time),
+    // n=N/2: unchanged (Nyquist), n=N/2+1..N-1: zeroed (remove negative-time).
+    for (int n = 1; n < N / 2; ++n)
+        spectrum[n] *= 2.0f;
+    for (int n = N / 2 + 1; n < N; ++n)
+        spectrum[n] = 0.0f;
+
+    // --- Step 4: FFT of windowed (real) cepstrum → complex log-spectrum C[k]. ---
+    // Output is conjugate-symmetric because the input is real.
+    fft.performRealOnlyForwardTransform (spectrum.data());
+
+    // --- Step 5: exp(C[k]) → minimum-phase complex spectrum H_min[k]. ---
+    for (int k = 0; k < N; ++k)
+    {
+        const float logMag = spectrum[2 * k];
+        const float phase  = spectrum[2 * k + 1];
+        const float mag    = std::exp (logMag);
+        spectrum[2 * k]     = mag * std::cos (phase);
+        spectrum[2 * k + 1] = mag * std::sin (phase);
+    }
+
+    // --- Step 6: IFFT → minimum-phase IR h_min[n] in spectrum[0..N-1]. ---
+    fft.performRealOnlyInverseTransform (spectrum.data());
+
+    // --- Step 7: Truncate to numTaps with a cosine fade-out on the last quarter. ---
+    // Unlike linear-phase, NO symmetric window is applied at the start — the energy
+    // is naturally front-loaded, so windowing the start would add artificial pre-ring.
+    std::vector<float> firCoeffs (numTaps, 0.0f);
+    const int copyLen   = std::min (numTaps, N);
+    const int fadeLen   = std::max (1, numTaps / 4);
+    const int fadeStart = numTaps - fadeLen;
+
+    for (int i = 0; i < copyLen; ++i)
+    {
+        float win = 1.0f;
+        if (i >= fadeStart)
+        {
+            const float t = (float) (i - fadeStart) / (float) (fadeLen - 1);
+            win = 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+        }
+        firCoeffs[i] = spectrum[i] * win;
     }
 
     return firCoeffs;

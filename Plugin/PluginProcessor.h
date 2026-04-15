@@ -40,8 +40,11 @@ public:
     // Load an artifact file.  Call from the message thread.
     // Returns an error string on failure, empty string on success.
     juce::String loadArtifact (const juce::File& file);
-    bool hasModel() const { return model.isValid(); }
-    const LNLModel& getModel() const { return model; }
+    // Display-only: updated by loadArtifact on the message thread so the editor
+    // can immediately show model info without waiting for the audio thread to
+    // consume the pending model.  Never touched by processBlock.
+    bool hasModel() const { return displayModelValid; }
+    const LNLModel& getModel() const { return displayModel; }
 
     //==========================================================================
     juce::AudioProcessorValueTreeState apvts;
@@ -55,8 +58,8 @@ private:
     // Overlap-save FFT convolution — used when block size matches olsBlockSize.
     void applyFIR_OLS (float* data, int numSamples, std::vector<float>& overlap);
 
-    // Rebuilds overlap-save state (filter spectrum + overlap buffers).
-    // Called from prepareToPlay and loadArtifact.
+    // Rebuilds overlap-save state (filter spectrum + overlap buffers) into live members.
+    // Called from prepareToPlay only — loadArtifact builds into PendingModelState.
     void setupOverlapSave (int numChannels, int samplesPerBlock);
 
     // Table-lookup waveshaper with linear interpolation.
@@ -68,7 +71,48 @@ private:
     // given drive position.  Cheap (1024-element lerp); called once per block.
     void updateBlendedWaveshaper (float drive);
 
-    LNLModel model;
+    // --- Thread-safe model swap ---
+    // loadArtifact (message thread) builds a PendingModelState and stores it here.
+    // consumePendingModel (called at the top of processBlock, audio thread) swaps
+    // it atomically into the live members.  The SpinLock protects the unique_ptr
+    // itself; the atomic flag is the fast-path check.
+    struct PendingModelState
+    {
+        LNLModel                         model;
+        std::vector<std::vector<float>>  firHistory;
+        std::vector<int>                 firHistoryWritePos;
+        std::vector<std::vector<float>>  dryDelayBuffer;
+        std::vector<int>                 dryDelayWritePos;
+        int                              dryGroupDelay     { 0 };
+        std::vector<float>               firSpectrum;
+        std::vector<std::vector<float>>  olsOverlap;
+        std::unique_ptr<juce::dsp::FFT>  olsFft;
+        int                              olsN              { 0 };
+        int                              olsOrder          { 0 };
+        int                              olsBlockSize      { 0 };
+        std::vector<float>               weightLpState;
+        std::vector<std::array<float,4>> lowShelfState;
+        std::vector<float>               blendedWaveshaper;
+        int                              blendLoIdx        { 0 };
+        int                              blendHiIdx        { 0 };
+        float                            blendT            { 0.0f };
+        float                            weightLpAlpha     { 0.0f };
+    };
+
+    // Called at the top of every processBlock to swap in a pending model if one exists.
+    void consumePendingModel();
+
+    std::unique_ptr<PendingModelState> pendingModel;
+    juce::SpinLock                     pendingModelLock;
+    std::atomic<bool>                  newModelPending { false };
+
+    // Message-thread display copy — set by loadArtifact, read by the editor.
+    // The audio thread never accesses these.
+    LNLModel displayModel;
+    bool     displayModelValid { false };
+
+    LNLModel   model;
+    juce::File currentArtifactFile;   // persisted in getStateInformation
 
     // Playback sample rate, captured in prepareToPlay so loadArtifact can use it.
     double currentSampleRate { 0.0 };

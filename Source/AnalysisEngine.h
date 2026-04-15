@@ -54,6 +54,14 @@ private:
         const std::vector<float>& hMag,
         int numTaps = 127);
 
+    // Designs a minimum-phase FIR of length numTaps from the same half-spectrum.
+    // Uses the cepstral method (Oppenheim & Schafer ch.12): log-mag → IFFT →
+    // causal liftering → FFT → exp → IFFT.  No pre-ringing — all energy is
+    // causal, matching the transient behaviour of real analog hardware.
+    static std::vector<float> designMinimumPhaseFIR (
+        const std::vector<float>& hMag,
+        int numTaps = 127);
+
     // 1/3-octave smoothing of a half-spectrum magnitude array.
     static void smoothMagnitude (std::vector<float>& hMag, double sampleRate);
 

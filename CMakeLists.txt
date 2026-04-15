@@ -54,22 +54,32 @@ target_compile_definitions(HardwareProfiler PRIVATE
     JUCE_USE_CURL=0
 )
 
+# Auto-install to /Applications after every build so the app in the
+# Applications folder always matches the latest build output.
+add_custom_command(TARGET HardwareProfiler POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "$<TARGET_BUNDLE_DIR:HardwareProfiler>"
+        "/Applications/Hardware Profiler.app"
+    COMMAND touch "/Applications/Hardware Profiler.app"
+    COMMENT "Installing Hardware Profiler.app to /Applications")
+
 # =============================================================================
 # Plugin (VST3 + AU)
 # =============================================================================
 juce_add_plugin(HardwareColor
-    PRODUCT_NAME     "Hardware Color"
-    VERSION          "1.2.0"
-    PLUGIN_MANUFACTURER_CODE Jmce
-    PLUGIN_CODE      HdCl
-    FORMATS          VST3 AU
-    IS_SYNTH         FALSE
-    NEEDS_MIDI_INPUT FALSE
-    NEEDS_MIDI_OUTPUT FALSE
-    IS_MIDI_EFFECT   FALSE
+    PRODUCT_NAME                "Hardware Color"
+    VERSION                     "1.3.0"
+    PLUGIN_MANUFACTURER_CODE    Jmce
+    PLUGIN_CODE                 HdCl
+    COMPANY_NAME                "Saturation Sounds"
+    FORMATS                     VST3 AU
+    IS_SYNTH                    FALSE
+    NEEDS_MIDI_INPUT            FALSE
+    NEEDS_MIDI_OUTPUT           FALSE
+    IS_MIDI_EFFECT              FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    VST3_CATEGORIES  "Fx|Distortion"
-    AU_MAIN_TYPE     kAudioUnitType_Effect
+    VST3_CATEGORIES             "Fx|Distortion"
+    AU_MAIN_TYPE                kAudioUnitType_Effect
 )
 
 target_sources(HardwareColor PRIVATE
@@ -91,6 +101,7 @@ target_link_libraries(HardwareColor PRIVATE
     juce::juce_audio_basics
     juce::juce_audio_processors
     juce::juce_audio_formats
+    juce::juce_audio_utils
     juce::juce_dsp
 )
 
@@ -101,3 +112,25 @@ target_compile_definitions(HardwareColor PUBLIC
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
 )
+
+# Install VST3, sign the whole bundle so all resources are sealed, then touch it.
+add_custom_command(TARGET HardwareColor_VST3 POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "$<TARGET_BUNDLE_DIR:HardwareColor_VST3>"
+        "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Hardware Color.vst3"
+    COMMAND codesign --force --sign -
+        "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Hardware Color.vst3"
+    COMMAND touch
+        "$ENV{HOME}/Library/Audio/Plug-Ins/VST3/Hardware Color.vst3"
+    COMMENT "Installing and signing Hardware Color VST3")
+
+# Install AU, sign the whole bundle, then touch it.
+add_custom_command(TARGET HardwareColor_AU POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "$<TARGET_BUNDLE_DIR:HardwareColor_AU>"
+        "$ENV{HOME}/Library/Audio/Plug-Ins/Components/Hardware Color.component"
+    COMMAND codesign --force --sign -
+        "$ENV{HOME}/Library/Audio/Plug-Ins/Components/Hardware Color.component"
+    COMMAND touch
+        "$ENV{HOME}/Library/Audio/Plug-Ins/Components/Hardware Color.component"
+    COMMENT "Installing and signing Hardware Color AU")

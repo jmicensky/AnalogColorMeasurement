@@ -1,3 +1,6 @@
+// Builds and manages an ordered list of (gain level, stimulus) capture steps for a measurement session.
+// Steps are sorted highest drive level first so A/D gain staging can be set once against the loudest step.
+
 #include "StimulusPlan.h"
 
 void StimulusPlan::build (const juce::String& gainsCsv, CaptureQuality quality)

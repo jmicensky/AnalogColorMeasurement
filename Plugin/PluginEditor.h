@@ -44,8 +44,9 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputGainAttach;
 
     // --- Artifact loader ---
-    juce::TextButton loadButton { "Load Model..." };
-    juce::Label      modelLabel;
+    juce::TextButton  loadButton { "Load Model..." };
+    juce::Label       modelLabel;
+
 
     // --- Spectrum display ---
     SpectrumDisplay spectrumDisplay;

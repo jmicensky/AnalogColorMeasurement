@@ -1,3 +1,6 @@
+// Manages the JUCE AudioDeviceManager: plays reference stimulus audio to the Send output
+// and simultaneously records the hardware return, then writes aligned ref/rec WAV files to disk.
+
 #include "AudioEngine.h"
 #include "LatencyAligner.h"
 

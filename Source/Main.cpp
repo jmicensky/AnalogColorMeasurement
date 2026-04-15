@@ -1,3 +1,6 @@
+// JUCE application entry point for the Hardware Profiler standalone app.
+// Creates the top-level DocumentWindow, sets MainComponent as its content, and starts the event loop.
+
 #include <juce_gui_extra/juce_gui_extra.h>
 #include "MainComponent.h"
 

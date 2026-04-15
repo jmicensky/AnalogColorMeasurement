@@ -1,3 +1,6 @@
+// Renders a logarithmic frequency-response curve (20 Hz–20 kHz, ±8 dB) with dB grid lines and frequency axis labels.
+// Used in both the profiler app and plugin editor to visualize the hardware's measured tonal character.
+
 #include "SpectrumDisplay.h"
 
 SpectrumDisplay::SpectrumDisplay()
@@ -12,6 +15,12 @@ void SpectrumDisplay::setData (const std::vector<float>& freqHz,
 {
     freqs = freqHz;
     mags  = magDb;
+    repaint();
+}
+
+void SpectrumDisplay::setShowSetupHints (bool show)
+{
+    showSetupHints = show;
     repaint();
 }
 
@@ -100,12 +109,84 @@ void SpectrumDisplay::paint (juce::Graphics& g)
     // --- FR curve ---
     if (freqs.size() < 2)
     {
-        g.setColour (juce::Colours::white.withAlpha (0.5f));
-        g.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
-        g.drawText ("No model loaded — run Analyze & Fit Model",
-                    juce::roundToInt (left), juce::roundToInt (top),
-                    juce::roundToInt (plotW), juce::roundToInt (plotH),
-                    juce::Justification::centred);
+        if (showSetupHints)
+        {
+            // Semi-transparent instructional overlay for first-time setup.
+            const float boxW   = std::min (plotW - 40.0f, 520.0f);
+            const float innerW = boxW - 36.0f;
+            const float padX   = left + (plotW - boxW) * 0.5f + 18.0f;
+
+            // Measure each hint at 12.5 pt with word-wrap to compute exact height needed.
+            const juce::String hints[] = {
+                u8"\u2022  Set input gain with the hardware at its loudest/most-driven setting \u2014 the plan starts there intentionally.",
+                u8"\u2022  Use a reamp box between your line output and the hardware input for correct impedance and level.",
+                u8"\u2022  Do NOT adjust the interface input gain between capture steps \u2014 all levels must stay fixed.",
+                u8"\u2022  Send and Return must be on the same physical interface so latency alignment works correctly."
+            };
+
+            const float hintFontH = 12.5f;
+            const float lineH     = hintFontH + 3.0f;   // px per text line
+            const float hintGap   = 8.0f;               // vertical gap between hints
+            const float titleH    = 18.0f;
+            const float titleGap  = 12.0f;
+            const float padTop    = 14.0f;
+            const float padBot    = 14.0f;
+
+            // Compute total height by counting wrapped lines per hint.
+            juce::Font hintFont (juce::FontOptions().withHeight (hintFontH));
+            float contentH = padTop + titleH + titleGap;
+            for (int i = 0; i < 4; ++i)
+            {
+                juce::AttributedString as;
+                as.append (hints[i], hintFont, juce::Colours::white);
+                as.setWordWrap (juce::AttributedString::byWord);
+                juce::TextLayout tl;
+                tl.createLayout (as, innerW);
+                contentH += tl.getNumLines() * lineH + hintGap;
+            }
+            contentH += padBot - hintGap;  // replace last gap with bottom pad
+
+            const float boxH = contentH;
+            const float boxX = left + (plotW - boxW) * 0.5f;
+            const float boxY = top  + (plotH - boxH) * 0.5f;
+
+            g.setColour (juce::Colour (0xcc333340));   // ~80% opaque dark grey
+            g.fillRoundedRectangle (boxX, boxY, boxW, boxH, 8.0f);
+            g.setColour (juce::Colour (0x66aaaacc));
+            g.drawRoundedRectangle (boxX, boxY, boxW, boxH, 8.0f, 1.0f);
+
+            float ty = boxY + padTop;
+
+            g.setColour (juce::Colours::white.withAlpha (0.85f));
+            g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f).withStyle ("Bold")));
+            g.drawText ("Interface Setup — Before You Measure", (int) padX, (int) ty,
+                        (int) innerW, (int) titleH, juce::Justification::centredLeft);
+            ty += titleH + titleGap;
+
+            g.setFont (hintFont);
+            g.setColour (juce::Colours::lightgrey.withAlpha (0.9f));
+
+            for (const auto& hint : hints)
+            {
+                juce::AttributedString as;
+                as.append (hint, hintFont, juce::Colours::lightgrey.withAlpha (0.9f));
+                as.setWordWrap (juce::AttributedString::byWord);
+                juce::TextLayout tl;
+                tl.createLayout (as, innerW);
+                const float blockH = tl.getNumLines() * lineH;
+                tl.draw (g, juce::Rectangle<float> (padX, ty, innerW, blockH));
+                ty += blockH + hintGap;
+            }
+        }
+        else
+        {
+            g.setColour (juce::Colours::white.withAlpha (0.5f));
+            g.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
+            g.drawText ("No model loaded — load a .json artifact file",
+                        juce::roundToInt (left), juce::roundToInt (top),
+                        juce::roundToInt (plotW), juce::roundToInt (plotH),
+                        juce::Justification::centred);
+        }
         return;
     }
 

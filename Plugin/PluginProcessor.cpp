@@ -1,3 +1,6 @@
+// AudioProcessor that applies a loaded LNLModel to incoming audio via the L-N-L chain: L1 FIR tone shaping, waveshaper nonlinearity, weight EQ, and dry/wet mix.
+// For multi-model artifacts the Drive knob interpolates between captured gain-level waveshaper tables in real time; single-model artifacts use Drive as a pre-amplification multiplier.
+
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 #include "../Source/ArtifactFile.h"
@@ -54,6 +57,13 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 {
     currentSampleRate = sampleRate;
 
+    // Discard any in-flight pending model — we rebuild everything fresh here.
+    {
+        juce::SpinLock::ScopedLockType sl (pendingModelLock);
+        pendingModel.reset();
+    }
+    newModelPending.store (false, std::memory_order_relaxed);
+
     // Always rebuild the FIR from stored frequency-response data at the current
     // sample rate.  This ensures the correct (odd) tap count and the latest
     // design improvements (taper, regularisation) are applied regardless of
@@ -71,7 +81,9 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 
     // Dry delay line: compensates the FIR's group delay so dry/wet mix is
     // phase-coherent.  Group delay of a linear-phase FIR = (taps - 1) / 2.
-    dryGroupDelay = model.l1Fir.empty() ? 0 : ((int) model.l1Fir.size() - 1) / 2;
+    // Minimum-phase FIR has near-zero bulk delay (energy front-loaded at n=0),
+    // so no dry-path compensation is needed and the host reports 0 latency.
+    dryGroupDelay = 0;
     const int dlyLen = std::max (1, dryGroupDelay);
     dryDelayBuffer.assign (numCh, std::vector<float> (dlyLen, 0.0f));
     dryDelayWritePos.assign (numCh, 0);
@@ -90,10 +102,61 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
 }
 
 //==============================================================================
+// Called at the top of every processBlock to swap in a pending model if one exists.
+// Uses ScopedTryLockType so the audio thread never blocks — if the message thread
+// is mid-write we skip this block and retry on the next one.
+void HardwareColorProcessor::consumePendingModel()
+{
+    if (! newModelPending.load (std::memory_order_relaxed))
+        return;
+
+    std::unique_ptr<PendingModelState> incoming;
+    {
+        juce::SpinLock::ScopedTryLockType sl (pendingModelLock);
+        if (sl.isLocked() && newModelPending.load (std::memory_order_acquire))
+        {
+            incoming = std::move (pendingModel);
+            newModelPending.store (false, std::memory_order_release);
+        }
+    }
+
+    if (! incoming) return;
+
+    model              = std::move (incoming->model);
+    firHistory         = std::move (incoming->firHistory);
+    firHistoryWritePos = std::move (incoming->firHistoryWritePos);
+    dryDelayBuffer     = std::move (incoming->dryDelayBuffer);
+    dryDelayWritePos   = std::move (incoming->dryDelayWritePos);
+    dryGroupDelay      = incoming->dryGroupDelay;
+
+    // Notify the host of any latency change now that the model is live.
+    // Calling this from processBlock (audio thread) ensures that if the host
+    // responds by calling prepareToPlay, the live model is already valid and
+    // prepareToPlay will rebuild correctly rather than discarding the pending model.
+    setLatencySamples (dryGroupDelay);
+    firSpectrum        = std::move (incoming->firSpectrum);
+    olsOverlap         = std::move (incoming->olsOverlap);
+    olsFft             = std::move (incoming->olsFft);
+    olsN               = incoming->olsN;
+    olsOrder           = incoming->olsOrder;
+    olsBlockSize       = incoming->olsBlockSize;
+    weightLpState      = std::move (incoming->weightLpState);
+    lowShelfState      = std::move (incoming->lowShelfState);
+    blendedWaveshaper  = std::move (incoming->blendedWaveshaper);
+    blendLoIdx         = incoming->blendLoIdx;
+    blendHiIdx         = incoming->blendHiIdx;
+    blendT             = incoming->blendT;
+    weightLpAlpha      = incoming->weightLpAlpha;
+}
+
+//==============================================================================
 void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                             juce::MidiBuffer&)
 {
     juce::ScopedNoDenormals noDenormals;
+
+    // Swap in any model that was loaded on the message thread.
+    consumePendingModel();
 
     if (! model.isValid())
         return;
@@ -103,6 +166,12 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     const float mix        = *apvts.getRawParameterValue ("mix");
     const float outputGain = juce::Decibels::decibelsToGain (
                                  apvts.getRawParameterValue ("outputGain")->load());
+    // Input pad baked into the artifact at analysis time.  Scales the signal
+    // into the waveshaper before the nonlinearity and restores it after so the
+    // saturation knee sits at the correct level regardless of DAW operating level.
+    // 0.0 dB = line level (no-op).  -18.0 dB = instrument level (guitar pedals etc).
+    const float inputPadGain   = juce::Decibels::decibelsToGain (model.inputPadDb);
+    const float inputPadMakeup = (model.inputPadDb < -0.1f) ? (1.0f / inputPadGain) : 1.0f;
 
     const int numChannels = buffer.getNumChannels();
     const int numSamples  = buffer.getNumSamples();
@@ -150,6 +219,11 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
 
         // --- N: waveshaper ---
+        // Apply input pad before the nonlinearity so the saturation knee sits at
+        // the level the hardware was designed for (baked in at analysis time).
+        if (model.inputPadDb < -0.1f)
+            juce::FloatVectorOperations::multiply (data, inputPadGain, numSamples);
+
         if (model.isMultiModel())
         {
             // Drive selects which captured gain-level model to use (0 = lightest,
@@ -171,6 +245,10 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 data[n] = applyWaveshaper (x) * makeupGain;
             }
         }
+
+        // Restore level after waveshaper so the FIR/EQ/mix operate at line level.
+        if (model.inputPadDb < -0.1f)
+            juce::FloatVectorOperations::multiply (data, inputPadMakeup, numSamples);
 
         // --- L1 FIR tone shaping applied post-saturation ---
         // Use overlap-save FFT convolution when the block size matches the
@@ -428,33 +506,37 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
     const juce::String err = ArtifactFile::load (file, newModel);
     if (err.isNotEmpty()) return err;
 
-    model = std::move (newModel);
+    currentArtifactFile = file;
+
+    // Build all audio-processing state on the message thread into a PendingModelState.
+    // The audio thread will atomically swap it in at the top of the next processBlock,
+    // eliminating the data race that caused crashes when loading while playing.
+    auto pms = std::make_unique<PendingModelState>();
+    pms->model = std::move (newModel);
 
     // Always rebuild the FIR so the correct odd tap count and latest design
     // improvements are applied regardless of what was saved in the artifact.
-    if (! model.frFrequencies.empty())
+    if (! pms->model.frFrequencies.empty())
     {
-        const double rate = (currentSampleRate > 0.0) ? currentSampleRate : model.sampleRate;
-        model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
-                          model.frFrequencies, model.frMagnitudeDb, rate);
+        const double rate = (currentSampleRate > 0.0) ? currentSampleRate : pms->model.sampleRate;
+        pms->model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
+                               pms->model.frFrequencies, pms->model.frMagnitudeDb, rate);
     }
 
-    // Backwards compatibility: if the artifact pre-dates the frFrequencies field,
-    // synthesize display data from the FIR's magnitude response so the spectrum
-    // display is populated even without re-running the analysis.
-    if (model.frFrequencies.empty() && model.l1Fir.size() > 1)
+    // Backwards compatibility: synthesize display FR from FIR magnitude if artifact
+    // pre-dates the frFrequencies field.
+    if (pms->model.frFrequencies.empty() && pms->model.l1Fir.size() > 1)
     {
-        const double sr    = (currentSampleRate > 0.0) ? currentSampleRate : model.sampleRate;
-        const int    nFft  = AnalysisEngine::kDesignN;   // 4096
-        juce::dsp::FFT fft (12);                          // 2^12 = 4096
+        const double sr   = (currentSampleRate > 0.0) ? currentSampleRate : pms->model.sampleRate;
+        const int    nFft = AnalysisEngine::kDesignN;   // 4096
+        juce::dsp::FFT fft (12);                         // 2^12 = 4096
 
         std::vector<float> buf (2 * nFft, 0.0f);
-        const int M = (int) std::min ((int) model.l1Fir.size(), nFft);
+        const int M = (int) std::min ((int) pms->model.l1Fir.size(), nFft);
         for (int i = 0; i < M; ++i)
-            buf[i] = model.l1Fir[i];
+            buf[i] = pms->model.l1Fir[i];
         fft.performRealOnlyForwardTransform (buf.data());
 
-        // Collect magnitudes.
         const int numBins = nFft / 2 + 1;
         std::vector<float> mags (numBins);
         for (int k = 0; k < numBins; ++k)
@@ -463,44 +545,100 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
             mags[k] = std::sqrt (re * re + im * im);
         }
 
-        // Normalise to 0 dB at 1 kHz so the display is centred like the
-        // analysis-engine output.
         const int bin1k = juce::jlimit (1, numBins - 1,
                               (int) std::round (1000.0 * nFft / sr));
         const float normMag = (mags[bin1k] > 1e-6f) ? mags[bin1k] : 1.0f;
 
         for (int k = 0; k < numBins; ++k)
         {
-            model.frFrequencies.push_back ((float) (k * sr / nFft));
-            model.frMagnitudeDb.push_back (20.0f * std::log10 (std::max (mags[k] / normMag, 1e-6f)));
+            pms->model.frFrequencies.push_back ((float) (k * sr / nFft));
+            pms->model.frMagnitudeDb.push_back (20.0f * std::log10 (std::max (mags[k] / normMag, 1e-6f)));
         }
     }
 
-    // Reset FIR and dry-delay histories for all channels.
+    // Build FIR history, dry delay, overlap-save state, and weight EQ state.
     const int numCh   = getTotalNumInputChannels();
-    const int histLen = model.l1Fir.empty() ? 0 : (int) model.l1Fir.size() - 1;
-    firHistory.assign (numCh, std::vector<float> (histLen, 0.0f));
-    firHistoryWritePos.assign (numCh, 0);
+    const int histLen = pms->model.l1Fir.empty() ? 0 : (int) pms->model.l1Fir.size() - 1;
+    pms->firHistory.assign (numCh, std::vector<float> (histLen, 0.0f));
+    pms->firHistoryWritePos.assign (numCh, 0);
 
-    dryGroupDelay = model.l1Fir.empty() ? 0 : ((int) model.l1Fir.size() - 1) / 2;
-    const int dlyLen = std::max (1, dryGroupDelay);
-    dryDelayBuffer.assign (numCh, std::vector<float> (dlyLen, 0.0f));
-    dryDelayWritePos.assign (numCh, 0);
+    pms->dryGroupDelay = pms->model.l1Fir.empty() ? 0
+                                                   : ((int) pms->model.l1Fir.size() - 1) / 2;
+    const int dlyLen = std::max (1, pms->dryGroupDelay);
+    pms->dryDelayBuffer.assign (numCh, std::vector<float> (dlyLen, 0.0f));
+    pms->dryDelayWritePos.assign (numCh, 0);
 
-    setLatencySamples (dryGroupDelay);
+    // Build overlap-save state (mirrors setupOverlapSave but into pms).
+    pms->olsBlockSize = olsBlockSize;   // preserved from last prepareToPlay
+    if (! pms->model.l1Fir.empty() && olsBlockSize > 0)
+    {
+        const int M = (int) pms->model.l1Fir.size();
+        int ord = 1;
+        while ((1 << ord) < olsBlockSize + M - 1)
+            ++ord;
+        pms->olsOrder = ord;
+        pms->olsN     = 1 << ord;
+        pms->olsFft   = std::make_unique<juce::dsp::FFT> (ord);
 
-    // Rebuild overlap-save filter spectrum for the new FIR.
-    // olsBlockSize is preserved from the last prepareToPlay call.
-    setupOverlapSave (numCh, olsBlockSize);
+        pms->firSpectrum.assign (2 * pms->olsN, 0.0f);
+        for (int k = 0; k < M; ++k)
+            pms->firSpectrum[k] = pms->model.l1Fir[k];
+        pms->olsFft->performRealOnlyForwardTransform (pms->firSpectrum.data());
 
-    weightLpState.assign (numCh, 0.0f);
-    lowShelfState.assign (numCh, {});
+        pms->olsOverlap.assign (numCh, std::vector<float> (M - 1, 0.0f));
+    }
+    else
+    {
+        pms->olsN = 0;
+    }
 
-    // Reset multi-model blend state — rebuilt on first processBlock.
-    blendedWaveshaper.clear();
-    blendLoIdx = 0;
-    blendHiIdx = 0;
-    blendT     = 0.0f;
+    pms->weightLpAlpha = weightLpAlpha;   // sample-rate-dependent, set in prepareToPlay
+    pms->weightLpState.assign (numCh, 0.0f);
+    pms->lowShelfState.assign (numCh, {});
+
+    // Build initial blended waveshaper for multi-model artifacts.
+    if (pms->model.isMultiModel())
+    {
+        const float drive = *apvts.getRawParameterValue ("drive");
+        const int N = (int) pms->model.gainModels.size();
+        if (N >= 2)
+        {
+            const float pos = juce::jlimit (0.0f, (float) (N - 1),
+                                            drive / 10.0f * (float) (N - 1));
+            const int   lo  = juce::jlimit (0, N - 2, (int) pos);
+            const int   hi  = lo + 1;
+            const float t   = pos - (float) lo;
+            pms->blendLoIdx = lo;
+            pms->blendHiIdx = hi;
+            pms->blendT     = t;
+
+            const auto& wsLo = pms->model.gainModels[lo].waveshaper;
+            const auto& wsHi = pms->model.gainModels[hi].waveshaper;
+            const int   wsN  = (int) wsLo.size();
+            if ((int) wsHi.size() == wsN)
+            {
+                pms->blendedWaveshaper.resize (wsN);
+                for (int i = 0; i < wsN; ++i)
+                    pms->blendedWaveshaper[i] = wsLo[i] * (1.0f - t) + wsHi[i] * t;
+            }
+            else
+            {
+                pms->blendedWaveshaper = wsLo;
+            }
+        }
+    }
+
+    // Update the message-thread display copy before moving pms so the editor
+    // can immediately reflect the loaded model (e.g. label, spectrum display).
+    displayModel      = pms->model;
+    displayModelValid = true;
+
+    // Hand off to the audio thread.
+    {
+        juce::SpinLock::ScopedLockType sl (pendingModelLock);
+        pendingModel = std::move (pms);
+    }
+    newModelPending.store (true, std::memory_order_release);
 
     return {};
 }
@@ -516,14 +654,28 @@ void HardwareColorProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
+    // Persist the loaded artifact path so the model reloads when the session reopens.
+    if (currentArtifactFile != juce::File{})
+        xml->setAttribute ("artifactPath", currentArtifactFile.getFullPathName());
     copyXmlToBinary (*xml, destData);
 }
 
 void HardwareColorProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
-    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
-        apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
+        return;
+
+    // Reload the artifact before restoring parameters so the model is ready.
+    const juce::String path = xml->getStringAttribute ("artifactPath");
+    if (path.isNotEmpty())
+    {
+        const juce::File f (path);
+        if (f.existsAsFile())
+            loadArtifact (f);   // ignores error — parameters still restored below
+    }
+
+    apvts.replaceState (juce::ValueTree::fromXml (*xml));
 }
 
 //==============================================================================
