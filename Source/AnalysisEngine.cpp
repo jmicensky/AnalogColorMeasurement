@@ -8,6 +8,10 @@ std::vector<float>                                   AnalysisEngine::wsAccum;
 std::vector<int>                                     AnalysisEngine::wsCounts;
 std::map<juce::String, std::vector<float>>           AnalysisEngine::perGainWsAccum;
 std::map<juce::String, std::vector<int>>             AnalysisEngine::perGainWsCounts;
+std::vector<float>                                   AnalysisEngine::wsAccumR;
+std::vector<int>                                     AnalysisEngine::wsCountsR;
+std::map<juce::String, std::vector<float>>           AnalysisEngine::perGainWsAccumR;
+std::map<juce::String, std::vector<int>>             AnalysisEngine::perGainWsCountsR;
 
 //==============================================================================
 // Entry point
@@ -133,6 +137,33 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
         model.l1Fir = { 1.0f };  // identity — no sweep files found
     }
 
+    // ---- 1b. Volterra kernel identification from sweep captures ----
+    // Fits h1 (linear, M1 taps) and h2 (2nd-order, M2 taps) via normal
+    // equations solved with Cholesky.  Uses the same sweep captures already
+    // loaded for the Wiener FR estimate — no extra recording required.
+    // On success modelType is set to Volterra and processBlock uses the
+    // Volterra path (h1 replaces l1Fir at runtime).  Falls back silently to
+    // LNL if the data is insufficient or the matrix is ill-conditioned.
+    if (sweepCount > 0)
+    {
+        for (const auto& refFile : sweepRefs)
+        {
+            juce::File recFile (refFile.getFullPathName().replace ("_ref.wav", "_rec.wav"));
+            if (! recFile.existsAsFile()) continue;
+
+            juce::AudioBuffer<float> vRefBuf, vRecBuf;
+            int vSamples;  double vSR;
+            if (! loadCapturePair (refFile, recFile, vRefBuf, vRecBuf, vSamples, vSR))
+                continue;
+
+            // Default depths: M1=32 taps (~0.7 ms linear memory),
+            // M2=8 taps (~0.18 ms quadratic memory, 36 interaction terms).
+            // P = 32 + 36 = 68 unknowns — Cholesky on a 68×68 matrix is fast.
+            if (identifyVolterraKernels (vRefBuf, vRecBuf, vSamples, model, vSR).isEmpty())
+                break;   // success — first good sweep provides enough data
+        }
+    }
+
     // ---- 2.  THD + waveshaper from sine-tone captures ----
     wsAccum .assign (kTableSize, 0.0f);
     wsCounts.assign (kTableSize, 0);
@@ -168,9 +199,154 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
         }
     }
 
-    finaliseWaveshaper (model);
-    populateGainModels (model);
+    finaliseWaveshaper (model, 0);
+    populateGainModels (model, 0);
     model.sampleRate = detectedSR;
+
+    // ---- R-channel pass (stereo devices only) ----
+    // Reload the same captures and repeat the analysis for channel 1.
+    // Any mono file silently clamps to its only channel so mono captures are unaffected.
+    {
+        // Check whether any sweep or tone file has a right channel.
+        bool hasStereoFiles = false;
+        {
+            juce::Array<juce::File> probeFiles;
+            folder.findChildFiles (probeFiles, juce::File::findFiles, true, "*_ref.wav");
+            for (const auto& f : probeFiles)
+            {
+                juce::AudioFormatManager fmt;
+                fmt.registerBasicFormats();
+                std::unique_ptr<juce::AudioFormatReader> rdr (fmt.createReaderFor (f));
+                if (rdr && rdr->numChannels >= 2) { hasStereoFiles = true; break; }
+            }
+        }
+
+        if (hasStereoFiles)
+        {
+            // ---- 1R. Frequency response (R channel) ----
+            std::vector<double> crossReR  (designBins, 0.0);
+            std::vector<double> crossImR  (designBins, 0.0);
+            std::vector<double> refPowerR (designBins, 0.0);
+            int sweepCountR = 0;
+
+            for (const auto& refFile : sweepRefs)
+            {
+                juce::File recFile (refFile.getFullPathName().replace ("_ref.wav", "_rec.wav"));
+                if (! recFile.existsAsFile()) continue;
+
+                juce::AudioBuffer<float> refBuf, recBuf;
+                int numSamples;  double sampleRate;
+                if (! loadCapturePair (refFile, recFile, refBuf, recBuf, numSamples, sampleRate))
+                    continue;
+
+                std::vector<double> cRe, cIm, rPow;
+                computeCrossSpectrum (refBuf, recBuf, numSamples, sampleRate,
+                                      cRe, cIm, rPow, 1);
+                for (int k = 0; k < designBins; ++k)
+                {
+                    crossReR  [k] += cRe  [k];
+                    crossImR  [k] += cIm  [k];
+                    refPowerR [k] += rPow [k];
+                }
+                ++sweepCountR;
+            }
+
+            if (sweepCountR > 0)
+            {
+                const double maxPow = *std::max_element (refPowerR.begin(), refPowerR.end());
+                const double lambda = 1e-6 * maxPow;
+
+                std::vector<float> hMagR (designBins);
+                for (int k = 0; k < designBins; ++k)
+                {
+                    const double num = std::sqrt (crossReR[k] * crossReR[k]
+                                                  + crossImR[k] * crossImR[k]);
+                    hMagR[k] = (float) (num / (refPowerR[k] + lambda));
+                }
+
+                smoothMagnitude (hMagR, detectedSR);
+
+                const int bin1k = juce::jlimit (1, designBins - 1,
+                                      (int) std::round (1000.0 * kDesignN / detectedSR));
+
+                if (hMagR[bin1k] >= 0.01f)
+                {
+                    const float norm = 1.0f / hMagR[bin1k];
+                    for (auto& v : hMagR) v *= norm;
+
+                    model.l1FirR = designLinearPhaseFIR (hMagR);
+
+                    const int taperStart = (int) (0.80f * (float) (designBins - 1));
+                    const int taperEnd   = designBins - 1;
+                    for (int k = 0; k < designBins; ++k)
+                    {
+                        float v = hMagR[k];
+                        if (k >= taperStart)
+                        {
+                            const float t = (float) (k - taperStart)
+                                            / (float) (taperEnd - taperStart);
+                            v *= 0.5f * (1.0f + std::cos (juce::MathConstants<float>::pi * t));
+                        }
+                        model.frMagnitudeDbR.push_back (20.0f * std::log10 (std::max (v, 1e-6f)));
+                    }
+                }
+                else
+                {
+                    model.l1FirR = { 1.0f };
+                    model.frMagnitudeDbR.assign (designBins, 0.0f);
+                }
+
+                // ---- 1bR. Volterra R channel ----
+                for (const auto& refFile : sweepRefs)
+                {
+                    juce::File recFile (refFile.getFullPathName().replace ("_ref.wav", "_rec.wav"));
+                    if (! recFile.existsAsFile()) continue;
+
+                    juce::AudioBuffer<float> vRefBuf, vRecBuf;
+                    int vSamples;  double vSR;
+                    if (! loadCapturePair (refFile, recFile, vRefBuf, vRecBuf, vSamples, vSR))
+                        continue;
+
+                    if (identifyVolterraKernels (vRefBuf, vRecBuf, vSamples, model, vSR,
+                                                 32, 8, 1).isEmpty())
+                        break;
+                }
+            }
+
+            // ---- 2R. Waveshaper from sine tones (R channel) ----
+            wsAccumR .assign (kTableSize, 0.0f);
+            wsCountsR.assign (kTableSize, 0);
+            perGainWsAccumR .clear();
+            perGainWsCountsR.clear();
+
+            for (const auto& [stimName, fundHz] :
+                 std::initializer_list<std::pair<juce::String, float>>
+                 { { "Sine1kHz", 1000.0f }, { "Sine100Hz", 100.0f } })
+            {
+                juce::Array<juce::File> toneRefs;
+                folder.findChildFiles (toneRefs, juce::File::findFiles, true,
+                                       "*_" + stimName + "_ref.wav");
+
+                for (const auto& refFile : toneRefs)
+                {
+                    juce::File recFile (refFile.getFullPathName().replace ("_ref.wav", "_rec.wav"));
+                    if (! recFile.existsAsFile()) continue;
+
+                    juce::AudioBuffer<float> refBuf, recBuf;
+                    int numSamples;  double sampleRate;
+                    if (! loadCapturePair (refFile, recFile, refBuf, recBuf, numSamples, sampleRate))
+                        continue;
+
+                    const juce::String gainLabel = refFile.getParentDirectory().getFileName();
+                    analyseSineTone (refBuf, recBuf, numSamples, sampleRate,
+                                     fundHz, gainLabel, stimName, model, 1);
+                }
+            }
+
+            finaliseWaveshaper (model, 1);
+            populateGainModels (model, 1);
+        }
+    }
 
     return {};
 }
@@ -196,8 +372,12 @@ void AnalysisEngine::computeCrossSpectrum (
     double /*sampleRate*/,
     std::vector<double>& outCrossRe,
     std::vector<double>& outCrossIm,
-    std::vector<double>& outRefPower)
+    std::vector<double>& outRefPower,
+    int channel)
 {
+    const int refCh = juce::jlimit (0, ref.getNumChannels() - 1, channel);
+    const int recCh = juce::jlimit (0, rec.getNumChannels() - 1, channel);
+
     // Choose FFT order to cover numSamples.
     int fftOrder = 1;
     while ((1 << fftOrder) < numSamples) ++fftOrder;
@@ -209,8 +389,8 @@ void AnalysisEngine::computeCrossSpectrum (
     std::vector<float> recData (2 * N, 0.0f);
 
     const int numSrc = std::min (numSamples, N);
-    std::copy_n (ref.getReadPointer (0), numSrc, refData.data());
-    std::copy_n (rec.getReadPointer (0), numSrc, recData.data());
+    std::copy_n (ref.getReadPointer (refCh), numSrc, refData.data());
+    std::copy_n (rec.getReadPointer (recCh), numSrc, recData.data());
 
     fft.performRealOnlyForwardTransform (refData.data());
     fft.performRealOnlyForwardTransform (recData.data());
@@ -520,7 +700,8 @@ void AnalysisEngine::analyseSineTone (const juce::AudioBuffer<float>& ref,
                                        float fundamentalHz,
                                        const juce::String& gainLabel,
                                        const juce::String& stimulusName,
-                                       LNLModel& model)
+                                       LNLModel& model,
+                                       int channel)
 {
     if (numSamples < 4096) return;
 
@@ -532,8 +713,11 @@ void AnalysisEngine::analyseSineTone (const juce::AudioBuffer<float>& ref,
 
     juce::dsp::FFT fft (fftOrder);
 
+    const int recCh = juce::jlimit (0, rec.getNumChannels() - 1, channel);
+    const int refCh = juce::jlimit (0, ref.getNumChannels() - 1, channel);
+
     std::vector<float> recData (2 * fftSize, 0.0f);
-    const float* recPtr = rec.getReadPointer (0);
+    const float* recPtr = rec.getReadPointer (recCh);
     std::copy_n (recPtr + startSample, available, recData.data());
 
     // Hann window to reduce spectral leakage.
@@ -592,16 +776,22 @@ void AnalysisEngine::analyseSineTone (const juce::AudioBuffer<float>& ref,
     const float dcOffset = (float) (dcSum / available);
 
     // Accumulate waveshaper scatter: bin ref[n] → average rec[n] (DC-removed).
-    const float* refPtr = ref.getReadPointer (0);
+    const float* refPtr = ref.getReadPointer (refCh);
+
+    // Select the right accumulator set based on channel.
+    auto& wsAcc  = (channel == 0) ? wsAccum  : wsAccumR;
+    auto& wsCnts = (channel == 0) ? wsCounts : wsCountsR;
+    auto& pgMap  = (channel == 0) ? perGainWsAccum  : perGainWsAccumR;
+    auto& pgCMap = (channel == 0) ? perGainWsCounts : perGainWsCountsR;
 
     // Ensure per-gain buffers exist for this gain label.
-    if (perGainWsAccum.find (gainLabel) == perGainWsAccum.end())
+    if (pgMap.find (gainLabel) == pgMap.end())
     {
-        perGainWsAccum [gainLabel].assign (kTableSize, 0.0f);
-        perGainWsCounts[gainLabel].assign (kTableSize, 0);
+        pgMap [gainLabel].assign (kTableSize, 0.0f);
+        pgCMap[gainLabel].assign (kTableSize, 0);
     }
-    auto& pgAccum  = perGainWsAccum [gainLabel];
-    auto& pgCounts = perGainWsCounts[gainLabel];
+    auto& pgAccum  = pgMap [gainLabel];
+    auto& pgCounts = pgCMap[gainLabel];
 
     for (int n = startSample; n < startSample + available; ++n)
     {
@@ -609,8 +799,8 @@ void AnalysisEngine::analyseSineTone (const juce::AudioBuffer<float>& ref,
         const int binIdx = juce::jlimit (0, kTableSize - 1,
                                (int) ((x + 1.0f) * 0.5f * (float) (kTableSize - 1)));
         const float y = recPtr[n] - dcOffset;
-        wsAccum[binIdx]  += y;
-        wsCounts[binIdx] += 1;
+        wsAcc [binIdx] += y;
+        wsCnts[binIdx] += 1;
         pgAccum [binIdx] += y;
         pgCounts[binIdx] += 1;
     }
@@ -720,9 +910,12 @@ void AnalysisEngine::finaliseWaveshaperInto (std::vector<float>& wsOut,
 //==============================================================================
 // Finalise waveshaper table from accumulated scatter data.
 //==============================================================================
-void AnalysisEngine::finaliseWaveshaper (LNLModel& model)
+void AnalysisEngine::finaliseWaveshaper (LNLModel& model, int channel)
 {
-    finaliseWaveshaperInto (model.waveshaper, wsAccum, wsCounts);
+    if (channel == 0)
+        finaliseWaveshaperInto (model.waveshaper,  wsAccum,  wsCounts);
+    else
+        finaliseWaveshaperInto (model.waveshaperR, wsAccumR, wsCountsR);
 }
 
 //==============================================================================
@@ -731,14 +924,18 @@ void AnalysisEngine::finaliseWaveshaper (LNLModel& model)
 // Models are sorted by the numeric value parsed from the gain label
 // (e.g. "25%" → 25, "75%" → 75) and gainValue is normalised 0…1.
 //==============================================================================
-void AnalysisEngine::populateGainModels (LNLModel& model)
+void AnalysisEngine::populateGainModels (LNLModel& model, int channel)
 {
-    if (perGainWsAccum.empty())
+    auto& pgMap  = (channel == 0) ? perGainWsAccum  : perGainWsAccumR;
+    auto& pgCMap = (channel == 0) ? perGainWsCounts : perGainWsCountsR;
+    auto& dest   = (channel == 0) ? model.gainModels : model.gainModelsR;
+
+    if (pgMap.empty())
         return;
 
     // Collect labels and their parsed numeric values for sorting.
     std::vector<std::pair<float, juce::String>> sortable;
-    for (const auto& [label, _] : perGainWsAccum)
+    for (const auto& [label, _] : pgMap)
     {
         const float v = label.trimCharactersAtEnd ("%").getFloatValue();
         sortable.emplace_back (v, label);
@@ -747,8 +944,8 @@ void AnalysisEngine::populateGainModels (LNLModel& model)
                [] (const auto& a, const auto& b) { return a.first < b.first; });
 
     const int N = (int) sortable.size();
-    model.gainModels.clear();
-    model.gainModels.reserve (N);
+    dest.clear();
+    dest.reserve (N);
 
     for (int idx = 0; idx < N; ++idx)
     {
@@ -757,9 +954,9 @@ void AnalysisEngine::populateGainModels (LNLModel& model)
         gm.gainLabel  = label;
         gm.gainValue  = (N > 1) ? (float) idx / (float) (N - 1) : 0.5f;
         finaliseWaveshaperInto (gm.waveshaper,
-                                perGainWsAccum .at (label),
-                                perGainWsCounts.at (label));
-        model.gainModels.push_back (std::move (gm));
+                                pgMap .at (label),
+                                pgCMap.at (label));
+        dest.push_back (std::move (gm));
     }
 }
 
@@ -792,4 +989,177 @@ bool AnalysisEngine::loadCapturePair (const juce::File& refFile,
     recReader->read (&recBuf, 0, numSamples, 0, true, true);
 
     return true;
+}
+
+//==============================================================================
+// In-place lower-triangular Cholesky factorisation of a positive-definite n×n
+// symmetric matrix A stored row-major in a flat vector (length n*n).
+// On success the lower triangle of A is overwritten with L s.t. A = L Lᵀ.
+// Returns false if any diagonal pivot is non-positive (matrix not PD).
+//==============================================================================
+bool AnalysisEngine::choleskyDecompose (std::vector<double>& A, int n)
+{
+    for (int j = 0; j < n; ++j)
+    {
+        double s = A[j * n + j];
+        for (int k = 0; k < j; ++k)
+            s -= A[j * n + k] * A[j * n + k];
+        if (s <= 0.0) return false;
+        A[j * n + j] = std::sqrt (s);
+
+        const double Ljj = A[j * n + j];
+        for (int i = j + 1; i < n; ++i)
+        {
+            double t = A[i * n + j];
+            for (int k = 0; k < j; ++k)
+                t -= A[i * n + k] * A[j * n + k];
+            A[i * n + j] = t / Ljj;
+        }
+    }
+    return true;
+}
+
+//==============================================================================
+// Solve L Lᵀ x = b in-place (result overwrites b) given the lower-triangular
+// Cholesky factor L produced by choleskyDecompose.
+//==============================================================================
+void AnalysisEngine::choleskySolve (const std::vector<double>& L,
+                                     std::vector<double>& b, int n)
+{
+    // Forward substitution: L y = b
+    for (int i = 0; i < n; ++i)
+    {
+        double s = b[i];
+        for (int k = 0; k < i; ++k)
+            s -= L[i * n + k] * b[k];
+        b[i] = s / L[i * n + i];
+    }
+    // Back substitution: Lᵀ x = y
+    for (int i = n - 1; i >= 0; --i)
+    {
+        double s = b[i];
+        for (int k = i + 1; k < n; ++k)
+            s -= L[k * n + i] * b[k];
+        b[i] = s / L[i * n + i];
+    }
+}
+
+//==============================================================================
+// Identify second-order truncated Volterra kernels from one ref/rec pair via
+// normal equations solved with Cholesky factorisation.
+//
+// The model is:
+//   y[n] = Σ_{m=0}^{M1-1}   h1[m] x[n-m]
+//         + Σ_{m1=0}^{M2-1} Σ_{m2=m1}^{M2-1}  h2[m1,m2] x[n-m1] x[n-m2]
+//
+// h2 is stored flat upper-triangular:
+//   index(m1,m2) = m1*(2*M2 - m1 + 1)/2 + (m2 - m1)
+//
+// On success sets model.volterraH1/H2/M1/M2 and modelType = Volterra.
+// Returns an error string on failure; model is unchanged in that case.
+//==============================================================================
+juce::String AnalysisEngine::identifyVolterraKernels (
+    const juce::AudioBuffer<float>& ref,
+    const juce::AudioBuffer<float>& rec,
+    int numSamples,
+    LNLModel& model,
+    double sampleRate,
+    int m1Taps,
+    int m2Taps,
+    int channel)
+{
+    const int startN = std::max (m1Taps, m2Taps);
+    if (numSamples < startN + 1024)
+        return "Volterra: not enough samples ("
+               + juce::String (numSamples) + " available, "
+               + juce::String (startN + 1024) + " required)";
+
+    const int m2Pairs = m2Taps * (m2Taps + 1) / 2;
+    const int P       = m1Taps + m2Pairs;   // total unknowns
+
+    // Normal-equation accumulators in double precision.
+    std::vector<double> Rxx (P * P, 0.0);
+    std::vector<double> rxy (P,     0.0);
+    std::vector<double> phi (P);
+
+    const int refCh = juce::jlimit (0, ref.getNumChannels() - 1, channel);
+    const int recCh = juce::jlimit (0, rec.getNumChannels() - 1, channel);
+    const float* x = ref.getReadPointer (refCh);
+    const float* y = rec.getReadPointer (recCh);
+
+    for (int n = startN; n < numSamples; ++n)
+    {
+        // Linear regressors: x[n], x[n-1], ..., x[n-M1+1]
+        for (int m = 0; m < m1Taps; ++m)
+            phi[m] = x[n - m];
+
+        // Quadratic regressors: x[n-m1]*x[n-m2], 0 ≤ m1 ≤ m2 < M2
+        int idx = m1Taps;
+        for (int m1 = 0; m1 < m2Taps; ++m1)
+        {
+            const double xm1 = x[n - m1];
+            for (int m2 = m1; m2 < m2Taps; ++m2)
+                phi[idx++] = xm1 * x[n - m2];
+        }
+
+        // Accumulate upper triangle of Rxx and full rxy.
+        const double yn = y[n];
+        for (int i = 0; i < P; ++i)
+        {
+            for (int j = i; j < P; ++j)
+                Rxx[i * P + j] += phi[i] * phi[j];
+            rxy[i] += phi[i] * yn;
+        }
+    }
+
+    // Symmetrise from upper triangle.
+    for (int i = 0; i < P; ++i)
+        for (int j = i + 1; j < P; ++j)
+            Rxx[j * P + i] = Rxx[i * P + j];
+
+    // Tikhonov ridge: 1e-4 * mean diagonal keeps the matrix well-conditioned
+    // when some quadratic terms have low excitation energy.
+    double diagSum = 0.0;
+    for (int i = 0; i < P; ++i) diagSum += Rxx[i * P + i];
+    const double ridge = 1e-4 * diagSum / (double) P;
+    for (int i = 0; i < P; ++i) Rxx[i * P + i] += ridge;
+
+    if (! choleskyDecompose (Rxx, P))
+        return "Volterra: normal-equation matrix is not positive definite "
+               "(try shorter kernels or a better-excited capture)";
+
+    choleskySolve (Rxx, rxy, P);
+    // rxy now holds the solution [h1 (M1 entries) | h2_flat (m2Pairs entries)].
+
+    // Normalize h1 to unity gain at 1 kHz so the waveshaper knee sits at the
+    // same level as the LNL path (whose Wiener FIR is already 1 kHz-normalized).
+    {
+        const double omega1k = juce::MathConstants<double>::twoPi * 1000.0 / sampleRate;
+        double re = 0.0, im = 0.0;
+        for (int m = 0; m < m1Taps; ++m)
+        {
+            re += rxy[m] * std::cos (omega1k * m);
+            im -= rxy[m] * std::sin (omega1k * m);
+        }
+        const double norm = std::sqrt (re * re + im * im);
+        if (norm > 1e-6)
+            for (int i = 0; i < P; ++i)
+                rxy[i] /= norm;
+    }
+
+    if (channel == 0)
+    {
+        model.volterraM1 = m1Taps;
+        model.volterraM2 = m2Taps;
+        model.volterraH1.assign (rxy.begin(),          rxy.begin() + m1Taps);
+        model.volterraH2.assign (rxy.begin() + m1Taps, rxy.end());
+        model.modelType  = LNLModel::ModelType::Volterra;
+    }
+    else
+    {
+        model.volterraH1R.assign (rxy.begin(),          rxy.begin() + m1Taps);
+        model.volterraH2R.assign (rxy.begin() + m1Taps, rxy.end());
+    }
+
+    return {};
 }

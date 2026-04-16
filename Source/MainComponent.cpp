@@ -9,6 +9,15 @@
 
 MainComponent::MainComponent()
 {
+    // Persist toggle/routing settings between sessions.
+    {
+        juce::PropertiesFile::Options opts;
+        opts.applicationName     = "HardwareProfiler";
+        opts.filenameSuffix      = "settings";
+        opts.osxLibrarySubFolder = "Application Support";
+        appProperties.setStorageParameters (opts);
+    }
+
     // --- Project setup ---
     projectLabel.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
     addAndMakeVisible (projectLabel);
@@ -40,6 +49,17 @@ MainComponent::MainComponent()
     compressorModeButton.setClickingTogglesState (true);
     addAndMakeVisible (compressorModeButton);
 
+    if (auto* props = appProperties.getUserSettings())
+        instrumentLevelToggle.setToggleState (
+            props->getBoolValue ("instrumentLevel", false), juce::dontSendNotification);
+    instrumentLevelToggle.onClick = [this]
+    {
+        if (auto* props = appProperties.getUserSettings())
+        {
+            props->setValue ("instrumentLevel", instrumentLevelToggle.getToggleState());
+            props->saveIfNeeded();
+        }
+    };
     addAndMakeVisible (instrumentLevelToggle);
 
     // --- Capture quality selector ---

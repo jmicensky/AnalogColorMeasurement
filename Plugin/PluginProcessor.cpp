@@ -72,6 +72,21 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     {
         model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
                           model.frFrequencies, model.frMagnitudeDb, sampleRate);
+
+        // Volterra h1/h2 are capture-rate-specific time-domain kernels.
+        // At a different playback rate the tap spacing is wrong, so rebuild h1
+        // from the stored frequency response at the native tap count and zero h2
+        // (quadratic interactions can't be trivially resampled).
+        if (model.modelType == LNLModel::ModelType::Volterra
+            && model.volterraM1 > 0
+            && model.sampleRate > 0.0
+            && std::abs (sampleRate - model.sampleRate) > 0.5)
+        {
+            model.volterraH1 = AnalysisEngine::rebuildFirAtSampleRate (
+                                   model.frFrequencies, model.frMagnitudeDb,
+                                   sampleRate, model.volterraM1);
+            std::fill (model.volterraH2.begin(), model.volterraH2.end(), 0.0f);
+        }
     }
 
     const int numCh   = getTotalNumInputChannels();
@@ -99,6 +114,19 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
     weightLpAlpha = std::exp (-juce::MathConstants<float>::twoPi * 800.0f / (float) sampleRate);
     weightLpState.assign (numCh, 0.0f);
     lowShelfState.assign (numCh, {});
+
+    // Volterra delay buffer — sized to max(M1, M2), or cleared for LNL models.
+    const int volterraDepth = std::max (model.volterraM1, model.volterraM2);
+    if (volterraDepth > 0)
+    {
+        volterraDelayBuf.assign (numCh, std::vector<float> (volterraDepth, 0.0f));
+        volterraDelayWritePos.assign (numCh, 0);
+    }
+    else
+    {
+        volterraDelayBuf.clear();
+        volterraDelayWritePos.clear();
+    }
 }
 
 //==============================================================================
@@ -134,7 +162,7 @@ void HardwareColorProcessor::consumePendingModel()
     // responds by calling prepareToPlay, the live model is already valid and
     // prepareToPlay will rebuild correctly rather than discarding the pending model.
     setLatencySamples (dryGroupDelay);
-    firSpectrum        = std::move (incoming->firSpectrum);
+    firSpectra         = std::move (incoming->firSpectra);
     olsOverlap         = std::move (incoming->olsOverlap);
     olsFft             = std::move (incoming->olsFft);
     olsN               = incoming->olsN;
@@ -142,11 +170,17 @@ void HardwareColorProcessor::consumePendingModel()
     olsBlockSize       = incoming->olsBlockSize;
     weightLpState      = std::move (incoming->weightLpState);
     lowShelfState      = std::move (incoming->lowShelfState);
-    blendedWaveshaper  = std::move (incoming->blendedWaveshaper);
-    blendLoIdx         = incoming->blendLoIdx;
-    blendHiIdx         = incoming->blendHiIdx;
-    blendT             = incoming->blendT;
-    weightLpAlpha      = incoming->weightLpAlpha;
+    blendedWaveshaper    = std::move (incoming->blendedWaveshaper);
+    blendLoIdx           = incoming->blendLoIdx;
+    blendHiIdx           = incoming->blendHiIdx;
+    blendT               = incoming->blendT;
+    blendedWaveshaperR   = std::move (incoming->blendedWaveshaperR);
+    blendLoIdxR          = incoming->blendLoIdxR;
+    blendHiIdxR          = incoming->blendHiIdxR;
+    blendTR              = incoming->blendTR;
+    weightLpAlpha        = incoming->weightLpAlpha;
+    volterraDelayBuf     = std::move (incoming->volterraDelayBuf);
+    volterraDelayWritePos = std::move (incoming->volterraDelayWritePos);
 }
 
 //==============================================================================
@@ -194,6 +228,17 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         dryDelayWritePos.assign (numChannels, 0);
     }
 
+    // Ensure Volterra delay buffer is sized correctly (e.g. after a model load).
+    if (model.modelType == LNLModel::ModelType::Volterra && model.volterraM1 > 0)
+    {
+        const int volterraDepth = std::max (model.volterraM1, model.volterraM2);
+        if ((int) volterraDelayBuf.size() != numChannels)
+        {
+            volterraDelayBuf.assign (numChannels, std::vector<float> (volterraDepth, 0.0f));
+            volterraDelayWritePos.assign (numChannels, 0);
+        }
+    }
+
     for (int ch = 0; ch < numChannels; ++ch)
     {
         float* data = buffer.getWritePointer (ch);
@@ -218,48 +263,126 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             std::copy (data, data + numSamples, dry.begin());
         }
 
-        // --- N: waveshaper ---
-        // Apply input pad before the nonlinearity so the saturation knee sits at
-        // the level the hardware was designed for (baked in at analysis time).
-        if (model.inputPadDb < -0.1f)
-            juce::FloatVectorOperations::multiply (data, inputPadGain, numSamples);
-
-        if (model.isMultiModel())
+        // --- Volterra kernel + waveshaper  OR  classic N + L1 FIR ---
+        if (model.modelType == LNLModel::ModelType::Volterra && model.volterraM1 > 0)
         {
-            // Drive selects which captured gain-level model to use (0 = lightest,
-            // 10 = heaviest).  The blended table is recomputed once per block above
-            // the channel loop.  No amplitude pre-scaling: the waveshaper at each
-            // gain position already encodes the correct hardware transfer curve.
-            for (int n = 0; n < numSamples; ++n)
-                data[n] = applyWaveshaperTable (data[n], blendedWaveshaper);
+            // Volterra path: h1 (linear) + h2 (quadratic) replace the L1 FIR;
+            // the waveshaper follows as the memoryless nonlinearity stage.
+            if (model.inputPadDb < -0.1f)
+                juce::FloatVectorOperations::multiply (data, inputPadGain, numSamples);
+
+            {
+                auto& dBuf = volterraDelayBuf[ch];
+                int&  dPos = volterraDelayWritePos[ch];
+                const int depth = (int) dBuf.size();
+                const int M1    = model.volterraM1;
+                const int M2    = model.volterraM2;
+                const bool useRVolt = (ch == 1 && model.isStereoModel());
+                const auto& h1 = (useRVolt && ! model.volterraH1R.empty())
+                                     ? model.volterraH1R : model.volterraH1;
+                const auto& h2 = (useRVolt && ! model.volterraH2R.empty())
+                                     ? model.volterraH2R : model.volterraH2;
+
+                for (int n = 0; n < numSamples; ++n)
+                {
+                    dBuf[dPos] = data[n];
+
+                    // Linear part: Σ h1[m] x[n-m]
+                    double y = 0.0;
+                    for (int m = 0; m < M1; ++m)
+                        y += (double) h1[m]
+                             * (double) dBuf[(dPos - m + depth) % depth];
+
+                    // Quadratic part: Σ h2[m1,m2] x[n-m1] x[n-m2]  (upper-triangular)
+                    int h2i = 0;
+                    for (int m1 = 0; m1 < M2; ++m1)
+                    {
+                        const double xm1 = dBuf[(dPos - m1 + depth) % depth];
+                        for (int m2 = m1; m2 < M2; ++m2)
+                            y += (double) h2[h2i++]
+                                 * xm1 * (double) dBuf[(dPos - m2 + depth) % depth];
+                    }
+
+                    dPos = (dPos + 1) % depth;
+                    data[n] = (float) y;
+                }
+            }
+
+            // Waveshaper — same memoryless stage as the LNL N block.
+            const bool useRCh = (ch == 1 && model.isStereoModel());
+            if (model.isMultiModel())
+            {
+                const auto& wsTable = (useRCh && ! blendedWaveshaperR.empty())
+                                          ? blendedWaveshaperR : blendedWaveshaper;
+                for (int n = 0; n < numSamples; ++n)
+                    data[n] = applyWaveshaperTable (data[n], wsTable);
+            }
+            else
+            {
+                const auto& wsTable = (useRCh && ! model.waveshaperR.empty())
+                                          ? model.waveshaperR : model.waveshaper;
+                const float makeupGain = 1.0f / std::max (drive, 0.25f);
+                for (int n = 0; n < numSamples; ++n)
+                    data[n] = applyWaveshaperTable (data[n] * drive, wsTable) * makeupGain;
+            }
+
+            if (model.inputPadDb < -0.1f)
+                juce::FloatVectorOperations::multiply (data, inputPadMakeup, numSamples);
         }
         else
         {
-            // Single-model (legacy): Drive is a pre-amplification multiplier.
-            // Makeup gain keeps output level consistent as Drive changes.
-            // Clamped at 0.25 (4× max boost) so near-zero Drive fades gracefully.
-            const float makeupGain = 1.0f / std::max (drive, 0.25f);
-            for (int n = 0; n < numSamples; ++n)
+            // --- N: waveshaper ---
+            // Apply input pad before the nonlinearity so the saturation knee sits at
+            // the level the hardware was designed for (baked in at analysis time).
+            if (model.inputPadDb < -0.1f)
+                juce::FloatVectorOperations::multiply (data, inputPadGain, numSamples);
+
             {
-                const float x = data[n] * drive;
-                data[n] = applyWaveshaper (x) * makeupGain;
+                const bool useRChLNL = (ch == 1 && model.isStereoModel());
+                if (model.isMultiModel())
+                {
+                    // Drive selects which captured gain-level model to use (0 = lightest,
+                    // 10 = heaviest).  The blended table is recomputed once per block above
+                    // the channel loop.  No amplitude pre-scaling: the waveshaper at each
+                    // gain position already encodes the correct hardware transfer curve.
+                    const auto& wsTable = (useRChLNL && ! blendedWaveshaperR.empty())
+                                              ? blendedWaveshaperR : blendedWaveshaper;
+                    for (int n = 0; n < numSamples; ++n)
+                        data[n] = applyWaveshaperTable (data[n], wsTable);
+                }
+                else
+                {
+                    // Single-model: Drive is a pre-amplification multiplier.
+                    const auto& wsTable = (useRChLNL && ! model.waveshaperR.empty())
+                                              ? model.waveshaperR : model.waveshaper;
+                    const float makeupGain = 1.0f / std::max (drive, 0.25f);
+                    for (int n = 0; n < numSamples; ++n)
+                        data[n] = applyWaveshaperTable (data[n] * drive, wsTable) * makeupGain;
+                }
             }
-        }
 
-        // Restore level after waveshaper so the FIR/EQ/mix operate at line level.
-        if (model.inputPadDb < -0.1f)
-            juce::FloatVectorOperations::multiply (data, inputPadMakeup, numSamples);
+            // Restore level after waveshaper so the FIR/EQ/mix operate at line level.
+            if (model.inputPadDb < -0.1f)
+                juce::FloatVectorOperations::multiply (data, inputPadMakeup, numSamples);
 
-        // --- L1 FIR tone shaping applied post-saturation ---
-        // Use overlap-save FFT convolution when the block size matches the
-        // pre-computed FFT size; otherwise fall back to the circular-buffer
-        // direct-form (e.g. variable-block-size hosts).
-        if (! model.l1Fir.empty())
-        {
-            if (olsN > 0 && numSamples == olsBlockSize && ch < (int) olsOverlap.size())
-                applyFIR_OLS (data, numSamples, olsOverlap[ch]);
-            else
-                applyFIR (data, numSamples, firHistory[ch], firHistoryWritePos[ch]);
+            // --- L1 FIR tone shaping applied post-saturation ---
+            // Use overlap-save FFT convolution when the block size matches the
+            // pre-computed FFT size; otherwise fall back to the circular-buffer
+            // direct-form (e.g. variable-block-size hosts).
+            if (! model.l1Fir.empty())
+            {
+                // For stereo models ch==1 uses the R FIR; ch==0 (or mono) uses L.
+                const bool useR = (ch == 1 && model.isStereoModel());
+                const auto& firForCh = (useR && ! model.l1FirR.empty())
+                                           ? model.l1FirR : model.l1Fir;
+                const int specIdx = (useR && firSpectra.size() > 1) ? 1 : 0;
+
+                if (olsN > 0 && numSamples == olsBlockSize && ch < (int) olsOverlap.size()
+                    && specIdx < (int) firSpectra.size())
+                    applyFIR_OLS (data, numSamples, olsOverlap[ch], firSpectra[specIdx]);
+                else
+                    applyFIR (data, numSamples, firHistory[ch], firHistoryWritePos[ch], firForCh);
+            }
         }
 
         // --- Weight EQ ---
@@ -309,9 +432,10 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 //==============================================================================
 void HardwareColorProcessor::applyFIR (float* data, int numSamples,
                                         std::vector<float>& history,
-                                        int& writePos)
+                                        int& writePos,
+                                        const std::vector<float>& fir)
 {
-    const auto& coeffs = model.l1Fir;
+    const auto& coeffs = fir;
     const int   order  = (int) coeffs.size();
     const int   hLen   = (int) history.size();  // = order - 1
 
@@ -395,6 +519,40 @@ void HardwareColorProcessor::updateBlendedWaveshaper (float drive)
     blendedWaveshaper.resize (wsN);
     for (int i = 0; i < wsN; ++i)
         blendedWaveshaper[i] = wsLo[i] * (1.0f - t) + wsHi[i] * t;
+
+    // R-channel blend (stereo models only).
+    const int NR = (int) model.gainModelsR.size();
+    if (NR >= 2)
+    {
+        const float posR = juce::jlimit (0.0f, (float) (NR - 1),
+                                         drive / 10.0f * (float) (NR - 1));
+        const int loR = juce::jlimit (0, NR - 2, (int) posR);
+        const int hiR = loR + 1;
+        const float tR = posR - (float) loR;
+
+        if (loR != blendLoIdxR || hiR != blendHiIdxR
+            || std::abs (tR - blendTR) >= 0.0005f
+            || blendedWaveshaperR.empty())
+        {
+            blendLoIdxR = loR;
+            blendHiIdxR = hiR;
+            blendTR     = tR;
+
+            const auto& wsLoR = model.gainModelsR[loR].waveshaper;
+            const auto& wsHiR = model.gainModelsR[hiR].waveshaper;
+            const int   wsNR  = (int) wsLoR.size();
+            if ((int) wsHiR.size() == wsNR)
+            {
+                blendedWaveshaperR.resize (wsNR);
+                for (int i = 0; i < wsNR; ++i)
+                    blendedWaveshaperR[i] = wsLoR[i] * (1.0f - tR) + wsHiR[i] * tR;
+            }
+            else
+            {
+                blendedWaveshaperR = wsLoR;
+            }
+        }
+    }
 }
 
 //==============================================================================
@@ -406,7 +564,7 @@ void HardwareColorProcessor::setupOverlapSave (int numChannels, int samplesPerBl
     {
         olsN = 0;
         olsFft.reset();
-        firSpectrum.clear();
+        firSpectra.clear();
         olsOverlap.clear();
         return;
     }
@@ -422,11 +580,20 @@ void HardwareColorProcessor::setupOverlapSave (int numChannels, int samplesPerBl
     olsN     = 1 << ord;
     olsFft   = std::make_unique<juce::dsp::FFT> (ord);
 
-    // Precompute FFT of zero-padded FIR.  Stored in JUCE's interleaved [re,im] layout.
-    firSpectrum.assign (2 * olsN, 0.0f);
-    for (int k = 0; k < M; ++k)
-        firSpectrum[k] = model.l1Fir[k];
-    olsFft->performRealOnlyForwardTransform (firSpectrum.data());
+    auto buildSpectrum = [&] (const std::vector<float>& fir)
+    {
+        std::vector<float> spec (2 * olsN, 0.0f);
+        const int len = (int) fir.size();
+        for (int k = 0; k < len; ++k)
+            spec[k] = fir[k];
+        olsFft->performRealOnlyForwardTransform (spec.data());
+        return spec;
+    };
+
+    firSpectra.clear();
+    firSpectra.push_back (buildSpectrum (model.l1Fir));
+    if (model.isStereoModel() && ! model.l1FirR.empty())
+        firSpectra.push_back (buildSpectrum (model.l1FirR));
 
     // Per-channel overlap save buffers (M-1 zeros on init / model load).
     olsOverlap.assign (numChannels, std::vector<float> (M - 1, 0.0f));
@@ -434,10 +601,11 @@ void HardwareColorProcessor::setupOverlapSave (int numChannels, int samplesPerBl
 
 //==============================================================================
 void HardwareColorProcessor::applyFIR_OLS (float* data, int numSamples,
-                                            std::vector<float>& overlap)
+                                            std::vector<float>& overlap,
+                                            const std::vector<float>& spectrum)
 {
-    const int M   = (int) model.l1Fir.size();
-    const int ovL = M - 1;    // overlap length
+    const int M   = (int) spectrum.size() / 2;  // spectrum is 2*olsN interleaved
+    const int ovL = (int) overlap.size();       // = M_fir - 1
 
     // Build the N-sample input segment: [overlap | new_input] zero-padded to olsN.
     std::vector<float> seg (2 * olsN, 0.0f);
@@ -457,7 +625,7 @@ void HardwareColorProcessor::applyFIR_OLS (float* data, int numSamples,
     for (int k = 0; k < olsN; ++k)
     {
         const float re_x = seg[2 * k],         im_x = seg[2 * k + 1];
-        const float re_h = firSpectrum[2 * k],  im_h = firSpectrum[2 * k + 1];
+        const float re_h = spectrum[2 * k],  im_h = spectrum[2 * k + 1];
         seg[2 * k]     = re_x * re_h - im_x * im_h;
         seg[2 * k + 1] = re_x * im_h + im_x * re_h;
     }
@@ -521,6 +689,18 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
         const double rate = (currentSampleRate > 0.0) ? currentSampleRate : pms->model.sampleRate;
         pms->model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
                                pms->model.frFrequencies, pms->model.frMagnitudeDb, rate);
+
+        // Same rate-adaptation for Volterra kernels (see prepareToPlay for rationale).
+        if (pms->model.modelType == LNLModel::ModelType::Volterra
+            && pms->model.volterraM1 > 0
+            && pms->model.sampleRate > 0.0
+            && std::abs (rate - pms->model.sampleRate) > 0.5)
+        {
+            pms->model.volterraH1 = AnalysisEngine::rebuildFirAtSampleRate (
+                                        pms->model.frFrequencies, pms->model.frMagnitudeDb,
+                                        rate, pms->model.volterraM1);
+            std::fill (pms->model.volterraH2.begin(), pms->model.volterraH2.end(), 0.0f);
+        }
     }
 
     // Backwards compatibility: synthesize display FR from FIR magnitude if artifact
@@ -562,8 +742,9 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
     pms->firHistory.assign (numCh, std::vector<float> (histLen, 0.0f));
     pms->firHistoryWritePos.assign (numCh, 0);
 
-    pms->dryGroupDelay = pms->model.l1Fir.empty() ? 0
-                                                   : ((int) pms->model.l1Fir.size() - 1) / 2;
+    // Minimum-phase FIR (and Volterra h1) have negligible bulk delay —
+    // report zero latency to the host.
+    pms->dryGroupDelay = 0;
     const int dlyLen = std::max (1, pms->dryGroupDelay);
     pms->dryDelayBuffer.assign (numCh, std::vector<float> (dlyLen, 0.0f));
     pms->dryDelayWritePos.assign (numCh, 0);
@@ -580,10 +761,20 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
         pms->olsN     = 1 << ord;
         pms->olsFft   = std::make_unique<juce::dsp::FFT> (ord);
 
-        pms->firSpectrum.assign (2 * pms->olsN, 0.0f);
-        for (int k = 0; k < M; ++k)
-            pms->firSpectrum[k] = pms->model.l1Fir[k];
-        pms->olsFft->performRealOnlyForwardTransform (pms->firSpectrum.data());
+        auto buildPmsSpectrum = [&] (const std::vector<float>& fir)
+        {
+            std::vector<float> spec (2 * pms->olsN, 0.0f);
+            const int len = (int) fir.size();
+            for (int k = 0; k < len; ++k)
+                spec[k] = fir[k];
+            pms->olsFft->performRealOnlyForwardTransform (spec.data());
+            return spec;
+        };
+
+        pms->firSpectra.clear();
+        pms->firSpectra.push_back (buildPmsSpectrum (pms->model.l1Fir));
+        if (pms->model.isStereoModel() && ! pms->model.l1FirR.empty())
+            pms->firSpectra.push_back (buildPmsSpectrum (pms->model.l1FirR));
 
         pms->olsOverlap.assign (numCh, std::vector<float> (M - 1, 0.0f));
     }
@@ -595,6 +786,14 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
     pms->weightLpAlpha = weightLpAlpha;   // sample-rate-dependent, set in prepareToPlay
     pms->weightLpState.assign (numCh, 0.0f);
     pms->lowShelfState.assign (numCh, {});
+
+    // Volterra delay buffer — allocated for Volterra artifacts, cleared otherwise.
+    const int volterraDepth = std::max (pms->model.volterraM1, pms->model.volterraM2);
+    if (volterraDepth > 0)
+    {
+        pms->volterraDelayBuf.assign (numCh, std::vector<float> (volterraDepth, 0.0f));
+        pms->volterraDelayWritePos.assign (numCh, 0);
+    }
 
     // Build initial blended waveshaper for multi-model artifacts.
     if (pms->model.isMultiModel())

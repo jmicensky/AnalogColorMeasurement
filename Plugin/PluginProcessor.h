@@ -53,10 +53,12 @@ private:
     juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
 
     // Circular-buffer direct-form FIR — fallback when block size doesn't match.
-    void applyFIR (float* data, int numSamples, std::vector<float>& history, int& writePos);
+    void applyFIR (float* data, int numSamples, std::vector<float>& history, int& writePos,
+                   const std::vector<float>& fir);
 
     // Overlap-save FFT convolution — used when block size matches olsBlockSize.
-    void applyFIR_OLS (float* data, int numSamples, std::vector<float>& overlap);
+    void applyFIR_OLS (float* data, int numSamples, std::vector<float>& overlap,
+                       const std::vector<float>& spectrum);
 
     // Rebuilds overlap-save state (filter spectrum + overlap buffers) into live members.
     // Called from prepareToPlay only — loadArtifact builds into PendingModelState.
@@ -84,7 +86,7 @@ private:
         std::vector<std::vector<float>>  dryDelayBuffer;
         std::vector<int>                 dryDelayWritePos;
         int                              dryGroupDelay     { 0 };
-        std::vector<float>               firSpectrum;
+        std::vector<std::vector<float>>  firSpectra;   // [ch] precomputed FFTs; size 1=mono, 2=stereo
         std::vector<std::vector<float>>  olsOverlap;
         std::unique_ptr<juce::dsp::FFT>  olsFft;
         int                              olsN              { 0 };
@@ -96,7 +98,14 @@ private:
         int                              blendLoIdx        { 0 };
         int                              blendHiIdx        { 0 };
         float                            blendT            { 0.0f };
+        std::vector<float>               blendedWaveshaperR;
+        int                              blendLoIdxR       { 0 };
+        int                              blendHiIdxR       { 0 };
+        float                            blendTR           { 0.0f };
         float                            weightLpAlpha     { 0.0f };
+        // Volterra per-channel circular delay buffer (depth = max(M1,M2)).
+        std::vector<std::vector<float>>  volterraDelayBuf;
+        std::vector<int>                 volterraDelayWritePos;
     };
 
     // Called at the top of every processBlock to swap in a pending model if one exists.
@@ -122,9 +131,10 @@ private:
     std::vector<int>                firHistoryWritePos;   // circular write heads
 
     // Overlap-save FFT convolution state.
-    // firSpectrum: precomputed FFT of the zero-padded FIR (2*olsN interleaved).
+    // firSpectra[ch]: precomputed FFT of the zero-padded FIR for that channel.
+    // Size 1 = mono model (all channels share [0]); size 2 = stereo model.
     // olsOverlap:  per-channel save buffer of M-1 samples.
-    std::vector<float>              firSpectrum;
+    std::vector<std::vector<float>> firSpectra;
     std::vector<std::vector<float>> olsOverlap;
     std::unique_ptr<juce::dsp::FFT> olsFft;
     int                             olsN         { 0 };  // FFT size
@@ -147,11 +157,21 @@ public:
     static BiquadCoeffs makeLowShelfCoeffs (float gainDb, double sampleRate);
 
 private:
-    // Multi-model blend state.
-    std::vector<float> blendedWaveshaper;  // interpolated table for current drive
+    // Multi-model blend state — L channel (and mono).
+    std::vector<float> blendedWaveshaper;
     int   blendLoIdx { 0 };
     int   blendHiIdx { 0 };
     float blendT     { 0.0f };
+    // R channel (stereo models only).
+    std::vector<float> blendedWaveshaperR;
+    int   blendLoIdxR { 0 };
+    int   blendHiIdxR { 0 };
+    float blendTR     { 0.0f };
+
+    // Volterra per-channel circular delay buffer.
+    // Depth = max(volterraM1, volterraM2); empty for LNL artifacts.
+    std::vector<std::vector<float>> volterraDelayBuf;
+    std::vector<int>                volterraDelayWritePos;
 
     // Weight EQ state.
     // Right of centre (weight>0.5): one-pole high shelf at 800 Hz.

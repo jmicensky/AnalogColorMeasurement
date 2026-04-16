@@ -29,55 +29,15 @@ public:
     // FFT size used for FIR design — public so the plugin can reference it.
     static constexpr int kDesignN = 4096;
 
-private:
-    // --- Per-step analysis ---
-    // Offline Wiener-filter estimation of the transfer function.
-    // Computes the complex cross-spectrum conj(X)·Y and the reference power |X|²,
-    // both resampled to designBins resolution.
-    //
-    // Accumulating these across N sweeps before dividing gives *coherent* averaging:
-    // uncorrelated noise cancels, so SNR grows as N rather than √N.  This is
-    // equivalent to running NLMS with a vanishingly small step size (i.e. fully
-    // converged to the Wiener optimum) for each frequency band simultaneously.
-    static void computeCrossSpectrum (
+    static juce::String identifyVolterraKernels (
         const juce::AudioBuffer<float>& ref,
         const juce::AudioBuffer<float>& rec,
         int numSamples,
+        LNLModel& model,
         double sampleRate,
-        std::vector<double>& outCrossRe,    // Re(conj(X)·Y), designBins
-        std::vector<double>& outCrossIm,    // Im(conj(X)·Y), designBins
-        std::vector<double>& outRefPower);  // |X|²,          designBins
-
-    // Designs a linear-phase FIR of length numTaps from a half-spectrum
-    // magnitude array (kDesignN/2 + 1 entries).
-    static std::vector<float> designLinearPhaseFIR (
-        const std::vector<float>& hMag,
-        int numTaps = 127);
-
-    // Designs a minimum-phase FIR of length numTaps from the same half-spectrum.
-    // Uses the cepstral method (Oppenheim & Schafer ch.12): log-mag → IFFT →
-    // causal liftering → FFT → exp → IFFT.  No pre-ringing — all energy is
-    // causal, matching the transient behaviour of real analog hardware.
-    static std::vector<float> designMinimumPhaseFIR (
-        const std::vector<float>& hMag,
-        int numTaps = 127);
-
-    // 1/3-octave smoothing of a half-spectrum magnitude array.
-    static void smoothMagnitude (std::vector<float>& hMag, double sampleRate);
-
-    // Computes THD for one sine-tone capture and accumulates waveshaper scatter.
-    static void analyseSineTone (
-        const juce::AudioBuffer<float>& ref,
-        const juce::AudioBuffer<float>& rec,
-        int numSamples,
-        double sampleRate,
-        float fundamentalHz,
-        const juce::String& gainLabel,
-        const juce::String& stimulusName,
-        LNLModel& model);
-
-    // Averages the waveshaper scatter bins and fills model.waveshaper.
-    static void finaliseWaveshaper (LNLModel& model);
+        int m1Taps = 32,
+        int m2Taps = 8,
+        int channel = 0);
 
     // Loads a ref/rec WAV pair from disk into AudioBuffers.
     static bool loadCapturePair (const juce::File& refFile,
@@ -87,25 +47,67 @@ private:
                                   int& numSamples,
                                   double& sampleRate);
 
-    // --- Constants ---
-    static constexpr int kTableSize = 1024;  // waveshaper table entries
+private:
+    // --- Per-step analysis ---
+    static void computeCrossSpectrum (
+        const juce::AudioBuffer<float>& ref,
+        const juce::AudioBuffer<float>& rec,
+        int numSamples,
+        double sampleRate,
+        std::vector<double>& outCrossRe,
+        std::vector<double>& outCrossIm,
+        std::vector<double>& outRefPower,
+        int channel = 0);
 
-    // Shared waveshaper finalisation logic.  Fills wsOut from raw accumulator
-    // data using the same interpolation, extrapolation and slope-normalisation
-    // steps as the global finaliseWaveshaper.
+    static std::vector<float> designLinearPhaseFIR (
+        const std::vector<float>& hMag,
+        int numTaps = 127);
+
+    static std::vector<float> designMinimumPhaseFIR (
+        const std::vector<float>& hMag,
+        int numTaps = 127);
+
+    static void smoothMagnitude (std::vector<float>& hMag, double sampleRate);
+
+    static void analyseSineTone (
+        const juce::AudioBuffer<float>& ref,
+        const juce::AudioBuffer<float>& rec,
+        int numSamples,
+        double sampleRate,
+        float fundamentalHz,
+        const juce::String& gainLabel,
+        const juce::String& stimulusName,
+        LNLModel& model,
+        int channel = 0);
+
+    // channel=0 fills model.waveshaper; channel=1 fills model.waveshaperR.
+    static void finaliseWaveshaper (LNLModel& model, int channel = 0);
+
+    // channel=0 fills model.gainModels; channel=1 fills model.gainModelsR.
+    static void populateGainModels (LNLModel& model, int channel = 0);
+
+    // --- Constants ---
+    static constexpr int kTableSize = 1024;
+
     static void finaliseWaveshaperInto (std::vector<float>& wsOut,
                                         const std::vector<float>& accum,
                                         const std::vector<int>&   counts);
 
-    // Builds model.gainModels from the per-gain accumulators collected during
-    // analyseSineTone.  Called once after finaliseWaveshaper.
-    static void populateGainModels (LNLModel& model);
-
-    // --- Global waveshaper accumulator (reset before each project analysis) ---
+    // --- Global waveshaper accumulators (L channel) ---
     static std::vector<float> wsAccum;
     static std::vector<int>   wsCounts;
 
-    // --- Per-gain-label waveshaper accumulators ---
+    // --- Per-gain-label waveshaper accumulators (L channel) ---
     static std::map<juce::String, std::vector<float>> perGainWsAccum;
     static std::map<juce::String, std::vector<int>>   perGainWsCounts;
+
+    // --- R-channel waveshaper accumulators ---
+    static std::vector<float> wsAccumR;
+    static std::vector<int>   wsCountsR;
+    static std::map<juce::String, std::vector<float>> perGainWsAccumR;
+    static std::map<juce::String, std::vector<int>>   perGainWsCountsR;
+
+    //Cholesky helpers
+    static bool choleskyDecompose (std::vector<double>& A, int n);
+    static void choleskySolve (const std::vector<double>& R, std::vector<double>& b, int n);
 };

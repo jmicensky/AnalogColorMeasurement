@@ -94,6 +94,9 @@ private:
     juce::TextEditor projectNameEditor;
     juce::TextButton initProjectButton { "Create Project" };
 
+    // Persists toggle states and routing between sessions.
+    juce::ApplicationProperties appProperties;
+
     // --- Mode selector ---
     juce::Label modeLabel;
     juce::TextButton saturationModeButton  { "Saturation" };
