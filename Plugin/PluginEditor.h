@@ -43,10 +43,13 @@ private:
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> mixAttach;
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment> outputGainAttach;
 
+    // --- Bypass ---
+    juce::ToggleButton bypassButton { "Bypass" };
+    std::unique_ptr<juce::AudioProcessorValueTreeState::ButtonAttachment> bypassAttach;
+
     // --- Artifact loader ---
     juce::TextButton  loadButton { "Load Model..." };
     juce::Label       modelLabel;
-
 
     // --- Spectrum display ---
     SpectrumDisplay spectrumDisplay;

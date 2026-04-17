@@ -1002,6 +1002,12 @@ void AnalysisEngine::finaliseWaveshaperInto (std::vector<float>& wsOut,
         if (std::abs (slope) > 1e-6f)
             for (auto& v : wsOut) v /= slope;
     }
+
+    // Zero-center: remove any DC baked in from interface/device offsets at capture time.
+    // The slope normalisation above sets unity gain but doesn't force wsOut[center] == 0.
+    const float dc = wsOut[center];
+    if (std::abs (dc) > 1e-9f)
+        for (auto& v : wsOut) v -= dc;
 }
 
 //==============================================================================

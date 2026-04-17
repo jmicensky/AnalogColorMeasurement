@@ -26,7 +26,14 @@ public:
     //==========================================================================
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
-    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlock         (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+
+    // Connects our "bypass" parameter to the host's bypass button.
+    juce::AudioProcessorParameter* getBypassParameter() const override
+    {
+        return apvts.getParameter ("bypass");
+    }
 
     //==========================================================================
     juce::AudioProcessorEditor* createEditor() override;

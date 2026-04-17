@@ -25,10 +25,14 @@ HardwareColorEditor::HardwareColorEditor (HardwareColorProcessor& p)
     outputGainAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment> (
         processor.apvts, "outputGain",  outputGainSlider);
 
+    // --- Bypass ---
+    bypassAttach = std::make_unique<juce::AudioProcessorValueTreeState::ButtonAttachment> (
+        processor.apvts, "bypass", bypassButton);
+    addAndMakeVisible (bypassButton);
+
     // --- Artifact loader ---
     loadButton.addListener (this);
     addAndMakeVisible (loadButton);
-
 
     modelLabel.setJustificationType (juce::Justification::centredLeft);
     modelLabel.setFont (juce::Font (juce::FontOptions().withHeight (12.0f)));
@@ -209,6 +213,9 @@ void HardwareColorEditor::resized()
     const int btnH    = 28;
     const int totalKnobsW = knobW * 4 + margin * 3;
     const int knobStartX  = (getWidth() - totalKnobsW) / 2;
+
+    // Bypass button — top-right corner of the title bar row.
+    bypassButton.setBounds (getWidth() - margin - 72, 8, 72, 20);
 
     // Title row: top 36 px (painted, not a component).
     int y = 44;

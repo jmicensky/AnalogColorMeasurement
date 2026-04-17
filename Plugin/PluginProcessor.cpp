@@ -49,6 +49,11 @@ HardwareColorProcessor::createParameterLayout()
         juce::NormalisableRange<float> (-24.0f, 12.0f, 0.1f),
         6.0f));
 
+    params.push_back (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { "bypass", 1 },
+        "Bypass",
+        false));
+
     return { params.begin(), params.end() };
 }
 
@@ -224,6 +229,14 @@ void HardwareColorProcessor::consumePendingModel()
 }
 
 //==============================================================================
+void HardwareColorProcessor::processBlockBypassed (juce::AudioBuffer<float>&,
+                                                    juce::MidiBuffer&)
+{
+    // Still consume any pending model swap so state stays consistent.
+    consumePendingModel();
+}
+
+//==============================================================================
 void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                             juce::MidiBuffer&)
 {
@@ -231,6 +244,11 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
 
     // Swap in any model that was loaded on the message thread.
     consumePendingModel();
+
+    // Bypass: pass audio through unprocessed (host may also call processBlockBypassed
+    // directly, but some hosts route through processBlock with the parameter set).
+    if (apvts.getRawParameterValue ("bypass")->load() > 0.5f)
+        return;
 
     if (! model.isValid())
         return;
