@@ -73,6 +73,10 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
         model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
                           model.frFrequencies, model.frMagnitudeDb, sampleRate);
 
+        if (model.isStereoModel() && ! model.frMagnitudeDbR.empty())
+            model.l1FirR = AnalysisEngine::rebuildFirAtSampleRate (
+                               model.frFrequencies, model.frMagnitudeDbR, sampleRate);
+
         // Volterra h1/h2 are capture-rate-specific time-domain kernels.
         // At a different playback rate the tap spacing is wrong, so rebuild h1
         // from the stored frequency response at the native tap count and zero h2
@@ -86,6 +90,15 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
                                    model.frFrequencies, model.frMagnitudeDb,
                                    sampleRate, model.volterraM1);
             std::fill (model.volterraH2.begin(), model.volterraH2.end(), 0.0f);
+
+            if (model.isStereoModel() && ! model.volterraH1R.empty()
+                && ! model.frMagnitudeDbR.empty())
+            {
+                model.volterraH1R = AnalysisEngine::rebuildFirAtSampleRate (
+                                        model.frFrequencies, model.frMagnitudeDbR,
+                                        sampleRate, model.volterraM1);
+                std::fill (model.volterraH2R.begin(), model.volterraH2R.end(), 0.0f);
+            }
         }
     }
 
@@ -690,6 +703,10 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
         pms->model.l1Fir = AnalysisEngine::rebuildFirAtSampleRate (
                                pms->model.frFrequencies, pms->model.frMagnitudeDb, rate);
 
+        if (pms->model.isStereoModel() && ! pms->model.frMagnitudeDbR.empty())
+            pms->model.l1FirR = AnalysisEngine::rebuildFirAtSampleRate (
+                                    pms->model.frFrequencies, pms->model.frMagnitudeDbR, rate);
+
         // Same rate-adaptation for Volterra kernels (see prepareToPlay for rationale).
         if (pms->model.modelType == LNLModel::ModelType::Volterra
             && pms->model.volterraM1 > 0
@@ -700,6 +717,15 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
                                         pms->model.frFrequencies, pms->model.frMagnitudeDb,
                                         rate, pms->model.volterraM1);
             std::fill (pms->model.volterraH2.begin(), pms->model.volterraH2.end(), 0.0f);
+
+            if (pms->model.isStereoModel() && ! pms->model.volterraH1R.empty()
+                && ! pms->model.frMagnitudeDbR.empty())
+            {
+                pms->model.volterraH1R = AnalysisEngine::rebuildFirAtSampleRate (
+                                             pms->model.frFrequencies, pms->model.frMagnitudeDbR,
+                                             rate, pms->model.volterraM1);
+                std::fill (pms->model.volterraH2R.begin(), pms->model.volterraH2R.end(), 0.0f);
+            }
         }
     }
 
