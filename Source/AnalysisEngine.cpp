@@ -942,8 +942,8 @@ void AnalysisEngine::finaliseWaveshaperInto (std::vector<float>& wsOut,
 
         if (firstPop > 0)
         {
-            float slope = -1.0f;
-            for (int i = firstPop + 1; i <= std::min (firstPop + 8, kTableSize - 1); ++i)
+            float slope = 1.0f;   // default: linear continuation (not -1 which inverts)
+            for (int i = firstPop + 1; i <= std::min (firstPop + 64, kTableSize - 1); ++i)
             {
                 if (counts[i] > 0)
                 {
@@ -951,14 +951,20 @@ void AnalysisEngine::finaliseWaveshaperInto (std::vector<float>& wsOut,
                     break;
                 }
             }
+            // Taper slope to zero as we move further from the measured boundary
+            // so the table saturates rather than growing without bound.
             for (int i = 0; i < firstPop; ++i)
-                wsOut[i] = wsOut[firstPop] + slope * (float) (i - firstPop);
+            {
+                const float dist = (float)(firstPop - i) / (float)kTableSize;
+                const float taper = std::exp (-3.0f * dist);
+                wsOut[i] = wsOut[firstPop] + slope * (float)(i - firstPop) * taper;
+            }
         }
 
         if (lastPop >= 0 && lastPop < kTableSize - 1)
         {
-            float slope = -1.0f;
-            for (int i = lastPop - 1; i >= std::max (lastPop - 8, 0); --i)
+            float slope = 1.0f;   // default: linear continuation (not -1 which inverts)
+            for (int i = lastPop - 1; i >= std::max (lastPop - 64, 0); --i)
             {
                 if (counts[i] > 0)
                 {
@@ -967,7 +973,11 @@ void AnalysisEngine::finaliseWaveshaperInto (std::vector<float>& wsOut,
                 }
             }
             for (int i = lastPop + 1; i < kTableSize; ++i)
-                wsOut[i] = wsOut[lastPop] + slope * (float) (i - lastPop);
+            {
+                const float dist = (float)(i - lastPop) / (float)kTableSize;
+                const float taper = std::exp (-3.0f * dist);
+                wsOut[i] = wsOut[lastPop] + slope * (float)(i - lastPop) * taper;
+            }
         }
     }
 
