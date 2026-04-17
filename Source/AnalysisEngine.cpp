@@ -518,22 +518,10 @@ void AnalysisEngine::smoothMagnitude (std::vector<float>& hMag, double sampleRat
     const int numBins = (int) hMag.size();
     std::vector<float> smoothed (numBins, 0.0f);
 
-    // DC bin: the sine sweep has no DC energy so hMag[0] is the fallback value
-    // (1.0 before normalisation).  Using that hard-coded value creates a
-    // discontinuity in the spectrum when the transformer rolls off below ~30 Hz —
-    // the FIR then sees a step from 1.0 at DC to the measured roll-off value at
-    // the first measured bin, causing extra ringing that pushes the effective
-    // high-pass point higher than the transformer actually warrants.
-    // Fix: linearly extrapolate from the first two measured bins back to DC.
-    if (numBins > 2)
-    {
-        const float slope = hMag[2] - hMag[1];
-        smoothed[0] = std::max (0.01f, hMag[1] - slope);
-    }
-    else
-    {
-        smoothed[0] = (numBins > 1) ? hMag[1] : hMag[0];
-    }
+    // DC bin: the sweep contains no DC energy so the measurement here is noise.
+    // Force zero so the FIR blocks DC entirely — any residual offset from the
+    // waveshaper or audio interface is suppressed rather than shaped and amplified.
+    smoothed[0] = 0.0f;
 
     const float halfWidth = std::pow (2.0f, 1.0f / 6.0f);  // half an octave third
 
@@ -617,6 +605,11 @@ std::vector<float> AnalysisEngine::rebuildFirAtSampleRate (
             hMag[k] = storedLinear[lo] * (1.0f - t) + storedLinear[hi] * t;
         }
     }
+
+    // Force zero DC gain — same policy as smoothMagnitude at analysis time.
+    // Handles models stored before that fix was applied: their frMagDb[0] may
+    // still carry the old extrapolated value, so we clamp it here at rebuild time.
+    hMag[0] = 0.0f;
 
     // Use minimum-phase design so the FIR has no pre-ringing.
     // Analog hardware is inherently minimum-phase; a linear-phase FIR would
