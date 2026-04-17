@@ -1185,11 +1185,12 @@ juce::String AnalysisEngine::identifyVolterraKernels (
         for (int j = i + 1; j < P; ++j)
             Rxx[j * P + i] = Rxx[i * P + j];
 
-    // Tikhonov ridge: 1e-4 * mean diagonal keeps the matrix well-conditioned
-    // when some quadratic terms have low excitation energy.
+    // Tikhonov ridge: 1e-3 * mean diagonal keeps h2 well-conditioned for
+    // strongly nonlinear devices (e.g. guitar distortion pedals) where a
+    // second-order truncation is a poor fit and h2 would otherwise overfit.
     double diagSum = 0.0;
     for (int i = 0; i < P; ++i) diagSum += Rxx[i * P + i];
-    const double ridge = 1e-4 * diagSum / (double) P;
+    const double ridge = 1e-3 * diagSum / (double) P;
     for (int i = 0; i < P; ++i) Rxx[i * P + i] += ridge;
 
     if (! choleskyDecompose (Rxx, P))

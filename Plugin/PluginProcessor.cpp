@@ -352,7 +352,10 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                     }
 
                     dPos = (dPos + 1) % depth;
-                    data[n] = (float) y;
+                    // Soft-limit before the waveshaper: tanh keeps small-signal behaviour
+                    // linear (tanh(x)≈x for |x|<<1) but prevents the quadratic Volterra
+                    // term from blowing up on transients and hard-clipping at the table edge.
+                    data[n] = (float) std::tanh (y);
                 }
             }
 
