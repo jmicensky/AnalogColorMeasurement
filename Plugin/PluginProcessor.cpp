@@ -491,6 +491,22 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // --- Output gain ---
         if (outputGain != 1.0f)
             juce::FloatVectorOperations::multiply (data, outputGain, numSamples);
+
+        // --- Output soft-limit ---
+        // Transparent below ±0.95 FS; smoothly saturates toward ±1.0 above that
+        // so the plugin never produces hard digital clipping internally.
+        // Any true overload is left to the DAW's output stage.
+        for (int n = 0; n < numSamples; ++n)
+        {
+            const float x  = data[n];
+            const float ax = std::abs (x);
+            if (ax > 0.95f)
+            {
+                constexpr float knee = 0.05f;
+                const float compressed = 0.95f + knee * std::tanh ((ax - 0.95f) / knee);
+                data[n] = std::copysign (compressed, x);
+            }
+        }
     }
 }
 
