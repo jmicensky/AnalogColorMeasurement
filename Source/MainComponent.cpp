@@ -154,6 +154,27 @@ MainComponent::MainComponent()
     statusLabel.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (statusLabel);
 
+    // --- Scale buttons ---
+    auto setupScaleBtn = [this] (juce::TextButton& btn, float scale)
+    {
+        btn.setClickingTogglesState (false);
+        btn.onClick = [this, &btn, scale]
+        {
+            uiScale = scale;
+            scaleBtn50 .setToggleState (&btn == &scaleBtn50,  juce::dontSendNotification);
+            scaleBtn75 .setToggleState (&btn == &scaleBtn75,  juce::dontSendNotification);
+            scaleBtn100.setToggleState (&btn == &scaleBtn100, juce::dontSendNotification);
+            scaleBtn125.setToggleState (&btn == &scaleBtn125, juce::dontSendNotification);
+            setSize (juce::roundToInt (1200 * scale), juce::roundToInt (720 * scale));
+        };
+        addAndMakeVisible (btn);
+    };
+    setupScaleBtn (scaleBtn50,  0.50f);
+    setupScaleBtn (scaleBtn75,  0.75f);
+    setupScaleBtn (scaleBtn100, 1.00f);
+    setupScaleBtn (scaleBtn125, 1.25f);
+    scaleBtn100.setToggleState (true, juce::dontSendNotification);
+
     // Register this component as the macOS menu bar model.
     // "Audio Device Settings..." appears under the app name in the menu bar.
     juce::PopupMenu appleExtras;
@@ -871,91 +892,123 @@ void MainComponent::paint (juce::Graphics& g)
 {
     g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
 
+    const float x0 = 10.0f;
+    const float x1 = (float) getWidth() - 10.0f;
+
     g.setColour (juce::Colours::grey);
-    g.drawHorizontalLine (96,               10.0f, (float) getWidth() - 10);  // below project
-    g.drawHorizontalLine (152,              10.0f, (float) getWidth() - 10);  // below mode
-    g.drawHorizontalLine (318,              10.0f, (float) getWidth() - 10);  // below routing+mono
-    g.drawHorizontalLine (getHeight() - 30, 10.0f, (float) getWidth() - 10);  // above status
+    if (sepY1 > 0) g.drawHorizontalLine (sepY1,              x0, x1);
+    if (sepY2 > 0) g.drawHorizontalLine (sepY2,              x0, x1);
+    if (sepY3 > 0) g.drawHorizontalLine (sepY3,              x0, x1);
+    g.drawHorizontalLine (getHeight() - juce::roundToInt (30 * uiScale), x0, x1);
 }
 
 void MainComponent::resized()
 {
-    const int margin = 12;
-    const int rowH   = 28;
-    const int labelW = 160;
+    // All base pixel values are authored at 100% (1200×720) and multiplied by uiScale.
+    auto s = [this] (int x) { return juce::roundToInt (x * uiScale); };
+
+    // Update fonts to match current scale everywhere.
+    const auto f14 = juce::Font (juce::FontOptions().withHeight (14.0f * uiScale));
+    projectLabel .setFont (f14);
+    modeLabel    .setFont (f14);
+    qualityLabel .setFont (f14);
+    routingLabel .setFont (f14);
+    planLabel    .setFont (f14);
+    planListModel.scale = uiScale;
+    planList.setRowHeight (s (22));
+
+    const int margin = s (12);
+    const int rowH   = s (28);
+    const int labelW = s (160);
     int y = margin;
 
     // --- Project setup ---
-    projectLabel.setBounds (margin,        y, 80,  rowH);
-    projectCombo.setBounds (margin + 85,   y, 340, rowH);
-    y += rowH + 6;
+    projectLabel.setBounds (margin,           y, s (80),  rowH);
+    projectCombo.setBounds (margin + s (85),  y, s (340), rowH);
+    y += rowH + s (6);
 
     if (projectNameEditor.isVisible())
     {
-        projectNameEditor.setBounds (margin + 85,       y, 240, rowH);
-        initProjectButton.setBounds (margin + 85 + 248, y, 130, rowH);
-        y += rowH + 6;
+        projectNameEditor.setBounds (margin + s (85),            y, s (240), rowH);
+        initProjectButton.setBounds (margin + s (85) + s (248),  y, s (130), rowH);
+        y += rowH + s (6);
     }
-    y += 4;
+    y += s (4);
+    sepY1 = y;   // separator: below project section
 
     // --- Mode selector ---
-    modeLabel.setBounds (margin, y, 200, 20);
-    y += 22;
-    saturationModeButton  .setBounds (margin,       y, 130, rowH);
-    compressorModeButton  .setBounds (margin + 140, y, 130, rowH);
-    instrumentLevelToggle .setBounds (margin + 290, y, 200, rowH);
-    y += rowH + 8;
+    modeLabel.setBounds (margin, y, s (200), s (20));
+    y += s (22);
+    saturationModeButton  .setBounds (margin,          y, s (130), rowH);
+    compressorModeButton  .setBounds (margin + s (140), y, s (130), rowH);
+    instrumentLevelToggle .setBounds (margin + s (290), y, s (200), rowH);
+    y += rowH + s (8);
 
     // --- Capture quality selector ---
-    qualityLabel  .setBounds (margin,       y, 130, rowH);
-    quickButton   .setBounds (margin + 135, y,  80, rowH);
-    standardButton.setBounds (margin + 225, y,  90, rowH);
-    hifiButton    .setBounds (margin + 325, y,  70, rowH);
-    y += rowH + margin + 6;
+    qualityLabel  .setBounds (margin,           y, s (130), rowH);
+    quickButton   .setBounds (margin + s (135), y, s (80),  rowH);
+    standardButton.setBounds (margin + s (225), y, s (90),  rowH);
+    hifiButton    .setBounds (margin + s (325), y, s (70),  rowH);
+    y += rowH + margin + s (6);
+    sepY2 = y;   // separator: below mode + quality section
 
     // --- Routing selector ---
-    routingLabel.setBounds (margin, y, 200, 20);
-    y += 24;
-    sendLabel  .setBounds (margin,          y, labelW, rowH);
-    sendCombo  .setBounds (margin + labelW, y, 220,    rowH);
-    y += rowH + 6;
-    returnLabel.setBounds (margin,          y, labelW, rowH);
-    returnCombo.setBounds (margin + labelW, y, 220,    rowH);
-    y += rowH + 6;
-    monitorLabel.setBounds (margin,          y, labelW, rowH);
-    monitorCombo.setBounds (margin + labelW, y, 220,    rowH);
-    y += rowH + 6;
-    monoModeToggle.setBounds (margin, y, 260, rowH);
-    y += rowH + margin + 2;
+    routingLabel.setBounds (margin, y, s (200), s (20));
+    y += s (24);
+    sendLabel  .setBounds (margin,           y, labelW,  rowH);
+    sendCombo  .setBounds (margin + labelW,  y, s (220), rowH);
+    y += rowH + s (6);
+    returnLabel.setBounds (margin,           y, labelW,  rowH);
+    returnCombo.setBounds (margin + labelW,  y, s (220), rowH);
+    y += rowH + s (6);
+    monitorLabel.setBounds (margin,           y, labelW,  rowH);
+    monitorCombo.setBounds (margin + labelW,  y, s (220), rowH);
+    y += rowH + s (6);
+    monoModeToggle.setBounds (margin, y, s (260), rowH);
+    y += rowH + margin + s (2);
+    sepY3 = y;   // separator: below routing + mono section
 
     // --- Measurement control ---
-    measureButton.setBounds (margin,       y, 200, rowH);
-    analyseButton.setBounds (margin + 210, y, 180, rowH);
-    y += rowH + margin + 8;
+    measureButton.setBounds (margin,          y, s (200), rowH);
+    analyseButton.setBounds (margin + s (210), y, s (180), rowH);
+    y += rowH + margin + s (8);
 
-    // Left column width: controls fit within ~460 px, leave right for meter + spectrum.
-    const int splitX   = 470;
-    const int meterW   = 42;             // vertical level meter strip
-    const int meterX   = splitX + margin;
-    const int rightX   = meterX + meterW + margin;
-    const int rightW   = getWidth() - rightX - margin;
-    const int bottomY  = getHeight() - 40;
+    // Left column: controls fit in ~460 px; right side holds meter + spectrum.
+    const int splitX  = s (470);
+    const int meterW  = s (42);
+    const int meterX  = splitX + margin;
+    const int rightX  = meterX + meterW + margin;
+    const int rightW  = getWidth() - rightX - margin;
+    const int bottomY = getHeight() - s (40);
 
     // --- Plan editor (left column) ---
-    planLabel.setBounds (margin, y, 200, 20);
-    y += 24;
-    planPresetCombo.setBounds (margin,                           y, splitX - margin * 2 - 118, rowH);
-    buildPlanButton.setBounds (splitX - margin * 2 - 118 + 8 + margin, y, 110,                  rowH);
-    y += rowH + 8;
+    planLabel.setBounds (margin, y, s (200), s (20));
+    y += s (24);
+    const int presetW = splitX - margin * 2 - s (118);
+    planPresetCombo.setBounds (margin,                     y, presetW,  rowH);
+    buildPlanButton.setBounds (margin + presetW + s (8),   y, s (110),  rowH);
+    y += rowH + s (8);
     planList.setBounds (margin, y, splitX - margin * 2, bottomY - y);
 
-    // --- Vertical level meter (between controls and spectrum) ---
-    returnMeter.setBounds (meterX, 8, meterW, bottomY - 8);
+    // --- Vertical level meter ---
+    returnMeter.setBounds (meterX, s (8), meterW, bottomY - s (8));
 
     // --- Spectrum display (right column) ---
-    spectrumDisplay.setBounds (rightX, 8, rightW, bottomY - 8);
+    spectrumDisplay.setBounds (rightX, s (8), rightW, bottomY - s (8));
 
+    // --- Scale buttons (bottom right, inside status bar row) ---
+    const int btnW   = s (36);
+    const int btnH   = s (18);
+    const int statusY = getHeight() - s (28);
+    const int btnY   = statusY + (s (28) - btnH) / 2;
+    int bx = getWidth() - margin;
+    bx -= btnW;           scaleBtn125.setBounds (bx, btnY, btnW, btnH);
+    bx -= btnW + s (3);   scaleBtn100.setBounds (bx, btnY, btnW, btnH);
+    bx -= btnW + s (3);   scaleBtn75 .setBounds (bx, btnY, btnW, btnH);
+    bx -= btnW + s (3);   scaleBtn50 .setBounds (bx, btnY, btnW, btnH);
 
-    // --- Status bar ---
-    statusLabel.setBounds (margin, getHeight() - 28, getWidth() - margin * 2, 24);
+    // --- Status bar (leave room for scale buttons on the right) ---
+    const int statusW = bx - margin - s (8);
+    statusLabel.setBounds (margin, statusY, statusW, s (24));
+    statusLabel.setFont (juce::Font (juce::FontOptions().withHeight (12.0f * uiScale)));
 }

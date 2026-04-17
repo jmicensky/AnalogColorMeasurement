@@ -22,7 +22,8 @@ private:
     // --- Plan list model ---
     struct PlanListModel : public juce::ListBoxModel
     {
-        const StimulusPlan* plan { nullptr };
+        const StimulusPlan* plan  { nullptr };
+        float               scale { 1.0f };
 
         int getNumRows() override
         {
@@ -46,13 +47,14 @@ private:
                 g.fillAll (juce::Colour (0xff222232));
 
             g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f)));
+            g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f * scale)));
 
+            const int indent = juce::roundToInt (8 * scale);
             const juce::String text = juce::String (row + 1) + ".  "
                                     + step.gainLabel + "  —  "
                                     + step.stimulusName
                                     + (step.completed ? "  [done]" : "");
-            g.drawText (text, 8, 0, width - 8, height, juce::Justification::centredLeft);
+            g.drawText (text, indent, 0, width - indent, height, juce::Justification::centredLeft);
         }
     };
 
@@ -130,6 +132,16 @@ private:
     juce::TextButton buildPlanButton { "Build Plan" };
     PlanListModel    planListModel;
     juce::ListBox    planList;
+
+    // --- UI scale ---
+    float            uiScale { 1.0f };
+    int              sepY1   { 0 };   // separator Y positions updated in resized()
+    int              sepY2   { 0 };
+    int              sepY3   { 0 };
+    juce::TextButton scaleBtn50  { "50%"  };
+    juce::TextButton scaleBtn75  { "75%"  };
+    juce::TextButton scaleBtn100 { "100%" };
+    juce::TextButton scaleBtn125 { "125%" };
 
     // --- Input level meter ---
     LevelMeter returnMeter;
