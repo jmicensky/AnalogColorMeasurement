@@ -296,7 +296,8 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
                     model.frMagnitudeDbR.assign (designBins, 0.0f);
                 }
 
-                // ---- 1bR. Volterra R channel ----
+                // ---- 1bR. Volterra R channel (only for Volterra artifacts) ----
+                if (model.modelType == LNLModel::ModelType::Volterra)
                 for (const auto& refFile : sweepRefs)
                 {
                     juce::File recFile (refFile.getFullPathName().replace ("_ref.wav", "_rec.wav"));
