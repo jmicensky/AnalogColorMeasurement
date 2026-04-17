@@ -107,6 +107,13 @@ private:
     static std::map<juce::String, std::vector<float>> perGainWsAccumR;
     static std::map<juce::String, std::vector<int>>   perGainWsCountsR;
 
+    // Identifies Volterra kernels for each gain level that has a sweep capture
+    // in its subfolder and stores them into gainModels[i].volterraH1/H2
+    // (channel=0) or gainModelsR[i].volterraH1R/H2R (channel=1).
+    static void populatePerLevelVolterraKernels (LNLModel& model,
+                                                  const juce::File& folder,
+                                                  int channel = 0);
+
     //Cholesky helpers
     static bool choleskyDecompose (std::vector<double>& A, int n);
     static void choleskySolve (const std::vector<double>& R, std::vector<double>& b, int n);

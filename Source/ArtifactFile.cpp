@@ -75,6 +75,11 @@ juce::String ArtifactFile::save (const LNLModel& model, const juce::File& file)
             obj->setProperty ("gainLabel",  gm.gainLabel);
             obj->setProperty ("gainValue",  (double) gm.gainValue);
             obj->setProperty ("waveshaper", vecToVar (gm.waveshaper));
+            if (! gm.volterraH1.empty())
+            {
+                obj->setProperty ("volterraH1", vecToVar (gm.volterraH1));
+                obj->setProperty ("volterraH2", vecToVar (gm.volterraH2));
+            }
             gmArr.add (juce::var (obj));
         }
         root->setProperty ("gainModels", gmArr);
@@ -100,6 +105,11 @@ juce::String ArtifactFile::save (const LNLModel& model, const juce::File& file)
                 obj->setProperty ("gainLabel",  gm.gainLabel);
                 obj->setProperty ("gainValue",  (double) gm.gainValue);
                 obj->setProperty ("waveshaper", vecToVar (gm.waveshaper));
+                if (! gm.volterraH1R.empty())
+                {
+                    obj->setProperty ("volterraH1R", vecToVar (gm.volterraH1R));
+                    obj->setProperty ("volterraH2R", vecToVar (gm.volterraH2R));
+                }
                 gmArrR.add (juce::var (obj));
             }
             root->setProperty ("gainModelsR", gmArrR);
@@ -173,9 +183,11 @@ juce::String ArtifactFile::load (const juce::File& file, LNLModel& model)
         for (const auto& item : *gmArr)
         {
             GainModel gm;
-            gm.gainLabel  = item["gainLabel"].toString();
-            gm.gainValue  = (float)(double) item["gainValue"];
-            gm.waveshaper = varToVec (item["waveshaper"]);
+            gm.gainLabel   = item["gainLabel"].toString();
+            gm.gainValue   = (float)(double) item["gainValue"];
+            gm.waveshaper  = varToVec (item["waveshaper"]);
+            gm.volterraH1  = varToVec (item["volterraH1"]);
+            gm.volterraH2  = varToVec (item["volterraH2"]);
             model.gainModels.push_back (std::move (gm));
         }
     }
@@ -192,9 +204,11 @@ juce::String ArtifactFile::load (const juce::File& file, LNLModel& model)
         for (const auto& item : *gmArrR)
         {
             GainModel gm;
-            gm.gainLabel  = item["gainLabel"].toString();
-            gm.gainValue  = (float)(double) item["gainValue"];
-            gm.waveshaper = varToVec (item["waveshaper"]);
+            gm.gainLabel    = item["gainLabel"].toString();
+            gm.gainValue    = (float)(double) item["gainValue"];
+            gm.waveshaper   = varToVec (item["waveshaper"]);
+            gm.volterraH1R  = varToVec (item["volterraH1R"]);
+            gm.volterraH2R  = varToVec (item["volterraH2R"]);
             model.gainModelsR.push_back (std::move (gm));
         }
     }

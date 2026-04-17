@@ -99,9 +99,14 @@ private:
         int                              blendHiIdx        { 0 };
         float                            blendT            { 0.0f };
         std::vector<float>               blendedWaveshaperR;
-        int                              blendLoIdxR       { 0 };
-        int                              blendHiIdxR       { 0 };
-        float                            blendTR           { 0.0f };
+        int                              blendLoIdxR        { 0 };
+        int                              blendHiIdxR        { 0 };
+        float                            blendTR            { 0.0f };
+        // Per-level blended Volterra kernels (empty = fall back to global).
+        std::vector<float>               blendedVolterraH1;
+        std::vector<float>               blendedVolterraH2;
+        std::vector<float>               blendedVolterraH1R;
+        std::vector<float>               blendedVolterraH2R;
         float                            weightLpAlpha     { 0.0f };
         // Volterra per-channel circular delay buffer (depth = max(M1,M2)).
         std::vector<std::vector<float>>  volterraDelayBuf;
@@ -167,6 +172,11 @@ private:
     int   blendLoIdxR { 0 };
     int   blendHiIdxR { 0 };
     float blendTR     { 0.0f };
+    // Per-level blended Volterra kernels (empty = fall back to global kernels).
+    std::vector<float> blendedVolterraH1;
+    std::vector<float> blendedVolterraH2;
+    std::vector<float> blendedVolterraH1R;
+    std::vector<float> blendedVolterraH2R;
 
     // Volterra per-channel circular delay buffer.
     // Depth = max(volterraM1, volterraM2); empty for LNL artifacts.

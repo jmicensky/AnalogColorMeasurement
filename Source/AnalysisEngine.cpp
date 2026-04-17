@@ -201,6 +201,7 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
 
     finaliseWaveshaper (model, 0);
     populateGainModels (model, 0);
+    populatePerLevelVolterraKernels (model, folder, 0);
     model.sampleRate = detectedSR;
 
     // ---- R-channel pass (stereo devices only) ----
@@ -346,10 +347,76 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
 
             finaliseWaveshaper (model, 1);
             populateGainModels (model, 1);
+            populatePerLevelVolterraKernels (model, folder, 1);
         }
     }
 
     return {};
+}
+
+//==============================================================================
+// Per-gain-level Volterra kernel identification.
+// For each GainModel whose folder contains a sweep capture, identifies h1/h2
+// using a scratch LNLModel so the global kernels on `model` are not touched.
+//==============================================================================
+void AnalysisEngine::populatePerLevelVolterraKernels (LNLModel& model,
+                                                       const juce::File& folder,
+                                                       int channel)
+{
+    if (model.modelType != LNLModel::ModelType::Volterra)
+        return;
+
+    auto& dest = (channel == 0) ? model.gainModels : model.gainModelsR;
+
+    for (auto& gm : dest)
+    {
+        const juce::File levelFolder = folder.getChildFile (gm.gainLabel);
+        if (! levelFolder.isDirectory()) continue;
+
+        // Find sweep ref files in this gain level's subfolder (skip tone files).
+        juce::Array<juce::File> candidates;
+        levelFolder.findChildFiles (candidates, juce::File::findFiles, false, "*_ref.wav");
+
+        for (const auto& refFile : candidates)
+        {
+            const juce::String name = refFile.getFileName();
+            if (name.contains ("Sine1kHz") || name.contains ("Sine100Hz"))
+                continue;
+
+            juce::File recFile (refFile.getFullPathName().replace ("_ref.wav", "_rec.wav"));
+            if (! recFile.existsAsFile()) continue;
+
+            juce::AudioBuffer<float> refBuf, recBuf;
+            int numSamples;  double sampleRate;
+            if (! loadCapturePair (refFile, recFile, refBuf, recBuf, numSamples, sampleRate))
+                continue;
+
+            // Use a scratch model so the global h1/h2 on `model` are not overwritten.
+            LNLModel scratch;
+            scratch.modelType  = LNLModel::ModelType::Volterra;
+            scratch.volterraM1 = model.volterraM1;
+            scratch.volterraM2 = model.volterraM2;
+
+            const juce::String err = identifyVolterraKernels (
+                refBuf, recBuf, numSamples, scratch, sampleRate,
+                model.volterraM1, model.volterraM2, 0);
+
+            if (err.isEmpty())
+            {
+                if (channel == 0)
+                {
+                    gm.volterraH1 = std::move (scratch.volterraH1);
+                    gm.volterraH2 = std::move (scratch.volterraH2);
+                }
+                else
+                {
+                    gm.volterraH1R = std::move (scratch.volterraH1);
+                    gm.volterraH2R = std::move (scratch.volterraH2);
+                }
+                break;   // one sweep per gain level is sufficient
+            }
+        }
+    }
 }
 
 //==============================================================================

@@ -99,6 +99,29 @@ void HardwareColorProcessor::prepareToPlay (double sampleRate, int samplesPerBlo
                                         sampleRate, model.volterraM1);
                 std::fill (model.volterraH2R.begin(), model.volterraH2R.end(), 0.0f);
             }
+
+            // Per-level kernel rate adaptation.
+            for (auto& gm : model.gainModels)
+            {
+                if (! gm.volterraH1.empty())
+                {
+                    gm.volterraH1 = AnalysisEngine::rebuildFirAtSampleRate (
+                        model.frFrequencies, model.frMagnitudeDb, sampleRate, model.volterraM1);
+                    std::fill (gm.volterraH2.begin(), gm.volterraH2.end(), 0.0f);
+                }
+            }
+            if (model.isStereoModel() && ! model.frMagnitudeDbR.empty())
+            {
+                for (auto& gm : model.gainModelsR)
+                {
+                    if (! gm.volterraH1R.empty())
+                    {
+                        gm.volterraH1R = AnalysisEngine::rebuildFirAtSampleRate (
+                            model.frFrequencies, model.frMagnitudeDbR, sampleRate, model.volterraM1);
+                        std::fill (gm.volterraH2R.begin(), gm.volterraH2R.end(), 0.0f);
+                    }
+                }
+            }
         }
     }
 
@@ -191,6 +214,10 @@ void HardwareColorProcessor::consumePendingModel()
     blendLoIdxR          = incoming->blendLoIdxR;
     blendHiIdxR          = incoming->blendHiIdxR;
     blendTR              = incoming->blendTR;
+    blendedVolterraH1    = std::move (incoming->blendedVolterraH1);
+    blendedVolterraH2    = std::move (incoming->blendedVolterraH2);
+    blendedVolterraH1R   = std::move (incoming->blendedVolterraH1R);
+    blendedVolterraH2R   = std::move (incoming->blendedVolterraH2R);
     weightLpAlpha        = incoming->weightLpAlpha;
     volterraDelayBuf     = std::move (incoming->volterraDelayBuf);
     volterraDelayWritePos = std::move (incoming->volterraDelayWritePos);
@@ -291,10 +318,18 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                 const int M1    = model.volterraM1;
                 const int M2    = model.volterraM2;
                 const bool useRVolt = (ch == 1 && model.isStereoModel());
-                const auto& h1 = (useRVolt && ! model.volterraH1R.empty())
-                                     ? model.volterraH1R : model.volterraH1;
-                const auto& h2 = (useRVolt && ! model.volterraH2R.empty())
-                                     ? model.volterraH2R : model.volterraH2;
+
+                // Priority: per-level blended kernels → global model kernels.
+                const bool useBlendedH1 = model.isMultiModel()
+                    && (useRVolt ? ! blendedVolterraH1R.empty() : ! blendedVolterraH1.empty());
+
+                const auto& h1 = useBlendedH1
+                    ? (useRVolt ? blendedVolterraH1R : blendedVolterraH1)
+                    : ((useRVolt && ! model.volterraH1R.empty()) ? model.volterraH1R : model.volterraH1);
+
+                const auto& h2 = useBlendedH1
+                    ? (useRVolt ? blendedVolterraH2R : blendedVolterraH2)
+                    : ((useRVolt && ! model.volterraH2R.empty()) ? model.volterraH2R : model.volterraH2);
 
                 for (int n = 0; n < numSamples; ++n)
                 {
@@ -566,6 +601,65 @@ void HardwareColorProcessor::updateBlendedWaveshaper (float drive)
             }
         }
     }
+
+    // Per-level Volterra kernel blend (Volterra multi-model only).
+    if (model.modelType == LNLModel::ModelType::Volterra)
+    {
+        // L channel.
+        const auto& h1Lo = model.gainModels[lo].volterraH1;
+        const auto& h1Hi = model.gainModels[hi].volterraH1;
+        const auto& h2Lo = model.gainModels[lo].volterraH2;
+        const auto& h2Hi = model.gainModels[hi].volterraH2;
+
+        if (! h1Lo.empty() && h1Lo.size() == h1Hi.size()
+            && ! h2Lo.empty() && h2Lo.size() == h2Hi.size())
+        {
+            blendedVolterraH1.resize (h1Lo.size());
+            for (int i = 0; i < (int) h1Lo.size(); ++i)
+                blendedVolterraH1[i] = h1Lo[i] * (1.0f - t) + h1Hi[i] * t;
+
+            blendedVolterraH2.resize (h2Lo.size());
+            for (int i = 0; i < (int) h2Lo.size(); ++i)
+                blendedVolterraH2[i] = h2Lo[i] * (1.0f - t) + h2Hi[i] * t;
+        }
+        else
+        {
+            blendedVolterraH1.clear();
+            blendedVolterraH2.clear();
+        }
+
+        // R channel.
+        if (NR >= 2)
+        {
+            const float posR = juce::jlimit (0.0f, (float) (NR - 1),
+                                             drive / 10.0f * (float) (NR - 1));
+            const int   loR  = juce::jlimit (0, NR - 2, (int) posR);
+            const int   hiR  = loR + 1;
+            const float tR   = posR - (float) loR;
+
+            const auto& h1LoR = model.gainModelsR[loR].volterraH1R;
+            const auto& h1HiR = model.gainModelsR[hiR].volterraH1R;
+            const auto& h2LoR = model.gainModelsR[loR].volterraH2R;
+            const auto& h2HiR = model.gainModelsR[hiR].volterraH2R;
+
+            if (! h1LoR.empty() && h1LoR.size() == h1HiR.size()
+                && ! h2LoR.empty() && h2LoR.size() == h2HiR.size())
+            {
+                blendedVolterraH1R.resize (h1LoR.size());
+                for (int i = 0; i < (int) h1LoR.size(); ++i)
+                    blendedVolterraH1R[i] = h1LoR[i] * (1.0f - tR) + h1HiR[i] * tR;
+
+                blendedVolterraH2R.resize (h2LoR.size());
+                for (int i = 0; i < (int) h2LoR.size(); ++i)
+                    blendedVolterraH2R[i] = h2LoR[i] * (1.0f - tR) + h2HiR[i] * tR;
+            }
+            else
+            {
+                blendedVolterraH1R.clear();
+                blendedVolterraH2R.clear();
+            }
+        }
+    }
 }
 
 //==============================================================================
@@ -726,6 +820,29 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
                                              rate, pms->model.volterraM1);
                 std::fill (pms->model.volterraH2R.begin(), pms->model.volterraH2R.end(), 0.0f);
             }
+
+            // Per-level kernel rate adaptation.
+            for (auto& gm : pms->model.gainModels)
+            {
+                if (! gm.volterraH1.empty())
+                {
+                    gm.volterraH1 = AnalysisEngine::rebuildFirAtSampleRate (
+                        pms->model.frFrequencies, pms->model.frMagnitudeDb, rate, pms->model.volterraM1);
+                    std::fill (gm.volterraH2.begin(), gm.volterraH2.end(), 0.0f);
+                }
+            }
+            if (pms->model.isStereoModel() && ! pms->model.frMagnitudeDbR.empty())
+            {
+                for (auto& gm : pms->model.gainModelsR)
+                {
+                    if (! gm.volterraH1R.empty())
+                    {
+                        gm.volterraH1R = AnalysisEngine::rebuildFirAtSampleRate (
+                            pms->model.frFrequencies, pms->model.frMagnitudeDbR, rate, pms->model.volterraM1);
+                        std::fill (gm.volterraH2R.begin(), gm.volterraH2R.end(), 0.0f);
+                    }
+                }
+            }
         }
     }
 
@@ -849,6 +966,49 @@ juce::String HardwareColorProcessor::loadArtifact (const juce::File& file)
             else
             {
                 pms->blendedWaveshaper = wsLo;
+            }
+
+            // Per-level Volterra kernel blend.
+            if (pms->model.modelType == LNLModel::ModelType::Volterra)
+            {
+                const auto& h1Lo = pms->model.gainModels[lo].volterraH1;
+                const auto& h1Hi = pms->model.gainModels[hi].volterraH1;
+                const auto& h2Lo = pms->model.gainModels[lo].volterraH2;
+                const auto& h2Hi = pms->model.gainModels[hi].volterraH2;
+                if (! h1Lo.empty() && h1Lo.size() == h1Hi.size()
+                    && ! h2Lo.empty() && h2Lo.size() == h2Hi.size())
+                {
+                    pms->blendedVolterraH1.resize (h1Lo.size());
+                    for (int i = 0; i < (int) h1Lo.size(); ++i)
+                        pms->blendedVolterraH1[i] = h1Lo[i] * (1.0f - t) + h1Hi[i] * t;
+                    pms->blendedVolterraH2.resize (h2Lo.size());
+                    for (int i = 0; i < (int) h2Lo.size(); ++i)
+                        pms->blendedVolterraH2[i] = h2Lo[i] * (1.0f - t) + h2Hi[i] * t;
+                }
+
+                const int NR = (int) pms->model.gainModelsR.size();
+                if (NR >= 2)
+                {
+                    const float posR = juce::jlimit (0.0f, (float)(NR - 1),
+                                                     drive / 10.0f * (float)(NR - 1));
+                    const int   loR  = juce::jlimit (0, NR - 2, (int) posR);
+                    const int   hiR  = loR + 1;
+                    const float tR   = posR - (float) loR;
+                    const auto& h1LoR = pms->model.gainModelsR[loR].volterraH1R;
+                    const auto& h1HiR = pms->model.gainModelsR[hiR].volterraH1R;
+                    const auto& h2LoR = pms->model.gainModelsR[loR].volterraH2R;
+                    const auto& h2HiR = pms->model.gainModelsR[hiR].volterraH2R;
+                    if (! h1LoR.empty() && h1LoR.size() == h1HiR.size()
+                        && ! h2LoR.empty() && h2LoR.size() == h2HiR.size())
+                    {
+                        pms->blendedVolterraH1R.resize (h1LoR.size());
+                        for (int i = 0; i < (int) h1LoR.size(); ++i)
+                            pms->blendedVolterraH1R[i] = h1LoR[i] * (1.0f - tR) + h1HiR[i] * tR;
+                        pms->blendedVolterraH2R.resize (h2LoR.size());
+                        for (int i = 0; i < (int) h2LoR.size(); ++i)
+                            pms->blendedVolterraH2R[i] = h2LoR[i] * (1.0f - tR) + h2HiR[i] * tR;
+                    }
+                }
             }
         }
     }

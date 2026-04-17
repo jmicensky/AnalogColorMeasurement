@@ -20,6 +20,15 @@ struct GainModel
     juce::String        gainLabel;
     float               gainValue  { 0.5f };
     std::vector<float>  waveshaper;   // 1024-entry table for this gain position
+
+    // Per-level Volterra kernels (Volterra artifacts only; empty = use global).
+    // Tap counts must match model.volterraM1 / volterraM2.
+    std::vector<float>  volterraH1;
+    std::vector<float>  volterraH2;
+
+    // Right-channel per-level kernels (stereo artifacts, gainModelsR entries only).
+    std::vector<float>  volterraH1R;
+    std::vector<float>  volterraH2R;
 };
 
 // Gray-box L–N–L model for a hardware device.
