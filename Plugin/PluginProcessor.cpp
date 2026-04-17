@@ -306,60 +306,74 @@ void HardwareColorProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         // --- Volterra kernel + waveshaper  OR  classic N + L1 FIR ---
         if (model.modelType == LNLModel::ModelType::Volterra && model.volterraM1 > 0)
         {
-            // Volterra path: h1 (linear) + h2 (quadratic) replace the L1 FIR;
-            // the waveshaper follows as the memoryless nonlinearity stage.
+            // Volterra path: L1 FIR provides the accurate linear frequency shaping
+            // (h1 from joint identification is a poor 32-tap approximation and is
+            // retired); h2 adds the quadratic nonlinear correction on top.
+            // The waveshaper follows as the memoryless nonlinearity stage.
             if (model.inputPadDb < -0.1f)
                 juce::FloatVectorOperations::multiply (data, inputPadGain, numSamples);
 
+            // Compute h2 quadratic correction from the pre-FIR input samples.
+            std::vector<float> h2corr (numSamples, 0.0f);
             {
                 auto& dBuf = volterraDelayBuf[ch];
                 int&  dPos = volterraDelayWritePos[ch];
                 const int depth = (int) dBuf.size();
-                const int M1    = model.volterraM1;
                 const int M2    = model.volterraM2;
                 const bool useRVolt = (ch == 1 && model.isStereoModel());
 
                 // Priority: per-level blended kernels → global model kernels.
-                const bool useBlendedH1 = model.isMultiModel()
-                    && (useRVolt ? ! blendedVolterraH1R.empty() : ! blendedVolterraH1.empty());
+                const bool useBlendedH2 = model.isMultiModel()
+                    && (useRVolt ? ! blendedVolterraH2R.empty() : ! blendedVolterraH2.empty());
 
-                const auto& h1 = useBlendedH1
-                    ? (useRVolt ? blendedVolterraH1R : blendedVolterraH1)
-                    : ((useRVolt && ! model.volterraH1R.empty()) ? model.volterraH1R : model.volterraH1);
-
-                const auto& h2 = useBlendedH1
+                const auto& h2 = useBlendedH2
                     ? (useRVolt ? blendedVolterraH2R : blendedVolterraH2)
                     : ((useRVolt && ! model.volterraH2R.empty()) ? model.volterraH2R : model.volterraH2);
 
-                for (int n = 0; n < numSamples; ++n)
+                if (! h2.empty())
                 {
-                    dBuf[dPos] = data[n];
-
-                    // Linear part: Σ h1[m] x[n-m]
-                    double y = 0.0;
-                    for (int m = 0; m < M1; ++m)
-                        y += (double) h1[m]
-                             * (double) dBuf[(dPos - m + depth) % depth];
-
-                    // Quadratic part: Σ h2[m1,m2] x[n-m1] x[n-m2]  (upper-triangular)
-                    int h2i = 0;
-                    for (int m1 = 0; m1 < M2; ++m1)
+                    for (int n = 0; n < numSamples; ++n)
                     {
-                        const double xm1 = dBuf[(dPos - m1 + depth) % depth];
-                        for (int m2 = m1; m2 < M2; ++m2)
-                            y += (double) h2[h2i++]
-                                 * xm1 * (double) dBuf[(dPos - m2 + depth) % depth];
-                    }
+                        dBuf[dPos] = data[n];
 
-                    dPos = (dPos + 1) % depth;
-                    // Soft-limit before the waveshaper: tanh keeps small-signal behaviour
-                    // linear (tanh(x)≈x for |x|<<1) but prevents the quadratic Volterra
-                    // term from blowing up on transients and hard-clipping at the table edge.
-                    data[n] = (float) std::tanh (y);
+                        // Quadratic part: Σ h2[m1,m2] x[n-m1] x[n-m2] (upper-triangular)
+                        double yq = 0.0;
+                        int h2i = 0;
+                        for (int m1 = 0; m1 < M2; ++m1)
+                        {
+                            const double xm1 = dBuf[(dPos - m1 + depth) % depth];
+                            for (int m2 = m1; m2 < M2; ++m2)
+                                yq += (double) h2[h2i++]
+                                      * xm1 * (double) dBuf[(dPos - m2 + depth) % depth];
+                        }
+
+                        dPos = (dPos + 1) % depth;
+                        h2corr[n] = (float) yq;
+                    }
                 }
             }
 
-            // Waveshaper — same memoryless stage as the LNL N block.
+            // Apply L1 FIR for accurate linear frequency shaping (same as LNL path).
+            if (! model.l1Fir.empty())
+            {
+                const bool useR = (ch == 1 && model.isStereoModel());
+                const auto& firForCh = (useR && ! model.l1FirR.empty())
+                                           ? model.l1FirR : model.l1Fir;
+                const int specIdx = (useR && firSpectra.size() > 1) ? 1 : 0;
+
+                if (olsN > 0 && numSamples == olsBlockSize && ch < (int) olsOverlap.size()
+                    && specIdx < (int) firSpectra.size())
+                    applyFIR_OLS (data, numSamples, olsOverlap[ch], firSpectra[specIdx]);
+                else
+                    applyFIR (data, numSamples, firHistory[ch], firHistoryWritePos[ch], firForCh);
+            }
+
+            // Sum L1 FIR output + h2 quadratic correction, then soft-limit to
+            // prevent the quadratic term from hard-clipping at the waveshaper edge.
+            for (int n = 0; n < numSamples; ++n)
+                data[n] = (float) std::tanh ((double) data[n] + (double) h2corr[n]);
+
+            // Waveshaper — memoryless nonlinearity stage.
             const bool useRCh = (ch == 1 && model.isStereoModel());
             if (model.isMultiModel())
             {
