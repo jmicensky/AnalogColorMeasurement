@@ -24,7 +24,7 @@ public:
         const std::vector<float>& frFreqHz,
         const std::vector<float>& frMagDb,
         double targetSampleRate,
-        int numTaps = 127);
+        int numTaps = -1);   // -1 = auto-scale with sample rate (~43 Hz LF floor)
 
     // FFT size used for FIR design — public so the plugin can reference it.
     static constexpr int kDesignN = 4096;

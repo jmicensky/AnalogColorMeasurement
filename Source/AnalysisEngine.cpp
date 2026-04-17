@@ -103,10 +103,15 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
             const float norm = 1.0f / hMag[bin1k];
             for (auto& v : hMag) v *= norm;
 
-            model.l1Fir = designLinearPhaseFIR (hMag);
+            {
+                int nTaps = (int) (detectedSR / 43.0);
+                if (nTaps % 2 == 0) ++nTaps;
+                nTaps = std::max (nTaps, 127);
+                model.l1Fir = designLinearPhaseFIR (hMag, nTaps);
+            }
 
             // Store the tapered magnitude so the display curve matches the FIR.
-            const int taperStart = (int) (0.80f * (float) (designBins - 1));
+            const int taperStart = (int) (0.90f * (float) (designBins - 1));
             const int taperEnd   = designBins - 1;
 
             for (int k = 0; k < designBins; ++k)
@@ -275,9 +280,14 @@ juce::String AnalysisEngine::analyseProjectFolder (const juce::File& folder,
                     const float norm = 1.0f / hMagR[bin1k];
                     for (auto& v : hMagR) v *= norm;
 
-                    model.l1FirR = designLinearPhaseFIR (hMagR);
+                    {
+                        int nTaps = (int) (detectedSR / 43.0);
+                        if (nTaps % 2 == 0) ++nTaps;
+                        nTaps = std::max (nTaps, 127);
+                        model.l1FirR = designLinearPhaseFIR (hMagR, nTaps);
+                    }
 
-                    const int taperStart = (int) (0.80f * (float) (designBins - 1));
+                    const int taperStart = (int) (0.90f * (float) (designBins - 1));
                     const int taperEnd   = designBins - 1;
                     for (int k = 0; k < designBins; ++k)
                     {
@@ -558,6 +568,15 @@ std::vector<float> AnalysisEngine::rebuildFirAtSampleRate (
     if (frFreqHz.empty() || frFreqHz.size() != frMagDb.size())
         return { 1.0f };  // identity — no stored FR data
 
+    // Auto-scale tap count with sample rate so LF coverage (~43 Hz floor) is
+    // preserved regardless of session rate.  Minimum 127; always odd.
+    if (numTaps <= 0)
+    {
+        numTaps = (int) (targetSampleRate / 43.0);
+        if (numTaps % 2 == 0) ++numTaps;
+        numTaps = std::max (numTaps, 127);
+    }
+
     const int numStored = (int) frFreqHz.size();
 
     // Convert stored dB values back to linear magnitude.
@@ -623,7 +642,7 @@ std::vector<float> AnalysisEngine::designLinearPhaseFIR (const std::vector<float
     // and in the FIR output.  The taper is relative to the design grid so it
     // always maps to 85–100% of the actual Nyquist regardless of sample rate.
     const int designBins = N / 2 + 1;
-    const int taperStart = (int) (0.80f * (float) (designBins - 1));
+    const int taperStart = (int) (0.90f * (float) (designBins - 1));
     const int taperEnd   = designBins - 1;
 
     std::vector<float> hTapered (hMag);
@@ -688,7 +707,7 @@ std::vector<float> AnalysisEngine::designMinimumPhaseFIR (const std::vector<floa
     const int designBins = N / 2 + 1;
 
     // Apply the same high-frequency taper as designLinearPhaseFIR.
-    const int taperStart = (int) (0.80f * (float) (designBins - 1));
+    const int taperStart = (int) (0.90f * (float) (designBins - 1));
     const int taperEnd   = designBins - 1;
     std::vector<float> hTapered (hMag);
     for (int k = taperStart; k <= taperEnd; ++k)
