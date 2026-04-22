@@ -103,7 +103,7 @@ private:
     juce::Label modeLabel;
     juce::TextButton saturationModeButton  { "Saturation" };
     juce::TextButton compressorModeButton  { "Compressor" };
-    juce::ToggleButton instrumentLevelToggle { "Instrument Level (-18 dB)" };
+    juce::ToggleButton instrumentLevelToggle { "Inst Level (-18 dB)" };
 
     // --- Capture quality selector ---
     juce::Label      qualityLabel  { {}, "Capture Quality:" };

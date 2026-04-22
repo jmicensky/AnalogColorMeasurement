@@ -1,0 +1,304 @@
+% ============================================================
+%  Analog Color Measurement — Graduate Assignment Writeup
+%  Paste into Overleaf (pdfLaTeX, no extra packages needed
+%  beyond the standard ones listed below).
+% ============================================================
+\documentclass[11pt, letterpaper]{article}
+
+% --- Packages -----------------------------------------------
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}       % nice tables
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{shapes.geometric, arrows.meta, positioning}
+
+% --- Metadata -----------------------------------------------
+\title{\textbf{Analog Color Measurement}\\[4pt]
+       \large Capturing and Modeling Hardware Nonlinearities\\
+       as Deployable Audio Plugins}
+\author{John Micensky}
+\date{\today}
+
+% ============================================================
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+% ------------------------------------------------------------
+\section{Introduction}
+\label{sec:intro}
+% TODO: Motivate the problem. Why does analog "color" matter?
+% What gap does this tool fill vs. existing impulse-response
+% capture workflows (which only model linear behavior)?
+
+% ------------------------------------------------------------
+\section{Background and Related Work}
+\label{sec:background}
+% TODO: Brief survey of:
+%   - Hammerstein / Wiener / L-N-L cascade models in audio literature
+%   - Existing hardware emulation approaches (convolution, circuit simulation)
+%   - Limitations of linear IR capture for saturating devices
+
+% ------------------------------------------------------------
+\section{System Overview}
+\label{sec:system}
+
+The measurement system is implemented as a JUCE standalone desktop application.
+Figure~\ref{fig:system_flow} gives a high-level view of the signal flow from
+hardware device under test through to the exported plugin model.
+
+% --- Block diagram placeholder ---
+\begin{figure}[H]
+    \centering
+    % TODO: replace with a real TikZ or inkscape figure
+    \fbox{\parbox{0.8\textwidth}{\centering\vspace{1.5cm}
+          [System block diagram: Device Under Test $\to$ ADC $\to$
+           Capture Pipeline $\to$ Analysis Engine $\to$ LNL Model $\to$ Plugin]\vspace{1.5cm}}}
+    \caption{End-to-end signal flow of the measurement and modeling pipeline.}
+    \label{fig:system_flow}
+\end{figure}
+
+\subsection{Application Architecture}
+% TODO: Describe the major software components:
+%   MainComponent (UI), AudioEngine (real-time I/O),
+%   StimulusPlan (test sequence), SessionWriter (disk I/O),
+%   AnalysisEngine (offline), LNLModel (data structure), Plugin target.
+
+\subsection{Session Outputs}
+Each measurement session produces four artifacts per stimulus step:
+\begin{itemize}
+    \item \texttt{*\_ref.wav} — the direct reference signal recorded simultaneously with playback
+    \item \texttt{*\_rec.wav} — the return signal captured from the hardware device
+    \item \texttt{session.json} — metadata (device name, sample rate, gain labels, timestamps)
+    \item \texttt{markers.json} — per-step index mapping filenames to gain settings and stimuli
+\end{itemize}
+
+% ------------------------------------------------------------
+\section{Stimulus Design}
+\label{sec:stimulus}
+
+Measurements are organized into a \emph{stimulus plan}: an ordered sequence of
+$(g, s)$ pairs where $g$ is a hardware gain setting and $s$ is one of the
+available test stimuli.  Three quality tiers are defined:
+
+\begin{table}[H]
+    \centering
+    \begin{tabular}{lll}
+        \toprule
+        \textbf{Quality} & \textbf{Stimuli} & \textbf{Purpose} \\
+        \midrule
+        Quick    & Sine sweep, 1\,kHz sine                                      & Fast sanity check \\
+        Standard & Sine sweep, 1\,kHz sine, 100\,Hz sine, drums excerpt         & Balanced coverage \\
+        HiFi     & Sine sweep, pink noise, 1\,kHz, 100\,Hz, drums excerpt       & Full characterization \\
+        \bottomrule
+    \end{tabular}
+    \caption{Stimulus quality tiers and their constituent signals.}
+    \label{tab:quality}
+\end{table}
+
+% TODO: Add rationale for each stimulus choice (e.g., why 100 Hz specifically,
+% why a real drums excerpt rather than a second sine).
+
+% ------------------------------------------------------------
+\section{Latency Alignment}
+\label{sec:latency}
+
+Before any analysis, the recorded signal $r[n]$ must be time-aligned with the
+reference signal $x[n]$ to compensate for round-trip hardware latency.
+The integer-sample delay $\hat{\tau}$ is estimated via normalized
+cross-correlation:
+
+\begin{equation}
+    \hat{\tau} \;=\; \arg\max_{\tau} \;
+    \frac{\displaystyle\sum_{n} x[n]\, r[n - \tau]}
+         {\sqrt{\displaystyle\sum_{n} x[n]^{2}\;
+                \displaystyle\sum_{n} r[n]^{2}}}
+    \label{eq:xcorr}
+\end{equation}
+
+The alignment is computed efficiently in the frequency domain using the FFT:
+
+\begin{equation}
+    C[k] \;=\; X[k] \cdot R^{*}[k],
+    \qquad
+    c[n] \;=\; \mathcal{F}^{-1}\!\left\{C[k]\right\},
+    \qquad
+    \hat{\tau} \;=\; \arg\max_{n}\; c[n]
+    \label{eq:xcorr_fft}
+\end{equation}
+
+% TODO: Report measured latency values on your test interface.
+% TODO: Discuss sub-sample interpolation if implemented.
+
+% ------------------------------------------------------------
+\section{Gray-Box L--N--L Model}
+\label{sec:lnl}
+
+\subsection{Model Motivation}
+\label{sec:lnl_motivation}
+
+A purely \emph{black-box} model (e.g., a deep neural network trained end-to-end)
+can achieve high accuracy but offers no interpretability and is expensive to
+deploy in real-time audio contexts.  A purely \emph{white-box} model (e.g., a
+full circuit simulation) is physically accurate but requires proprietary
+schematic knowledge and is computationally prohibitive at audio rates.
+
+This project adopts a \emph{gray-box} approach: the model topology is fixed by
+prior knowledge of analog signal chains (a cascade of linear filtering and a
+static nonlinearity), while the parameters of each block are estimated
+empirically from the captured data.
+
+\subsection{Model Structure}
+\label{sec:lnl_structure}
+
+The device under test is modeled as a \emph{Linear--Nonlinear--Linear} (L--N--L)
+cascade, illustrated in Figure~\ref{fig:lnl_diagram}.
+
+\begin{figure}[H]
+\centering
+\begin{tikzpicture}[
+    block/.style = {rectangle, draw, minimum width=2.2cm, minimum height=1cm,
+                    text centered, font=\small},
+    line/.style  = {draw, -{Stealth[length=2mm]}}
+]
+    \node[block]                       (l1) {$L_1[z]$\\{\tiny Input Filter}};
+    \node[block, right=1.4cm of l1]    (n)  {$\mathcal{N}(\cdot)$\\{\tiny Waveshaper}};
+    \node[block, right=1.4cm of n]     (l2) {$L_2[z]$\\{\tiny Output Filter}};
+
+    \coordinate (in)  at ([xshift=-1.4cm]l1.west);
+    \coordinate (out) at ([xshift=+1.4cm]l2.east);
+
+    \line (in)    -- node[above]{\small$x[n]$} (l1.west);
+    \line (l1.east) -- node[above]{\small$v[n]$} (n.west);
+    \line (n.east)  -- node[above]{\small$w[n]$} (l2.west);
+    \line (l2.east) -- node[above]{\small$\hat{y}[n]$} (out);
+\end{tikzpicture}
+\caption{L--N--L gray-box model. The input signal $x[n]$ passes through a
+linear FIR filter $L_1$, a static memoryless nonlinearity $\mathcal{N}$,
+and a second linear FIR filter $L_2$ to produce the model output
+$\hat{y}[n]$.}
+\label{fig:lnl_diagram}
+\end{figure}
+
+The model output is:
+
+\begin{equation}
+    \hat{y}[n] \;=\; \bigl(h_2 * \mathcal{N}(h_1 * x)\bigr)[n]
+    \label{eq:lnl}
+\end{equation}
+
+where $h_1$ and $h_2$ are the FIR impulse responses of $L_1$ and $L_2$
+respectively, $*$ denotes linear convolution, and $\mathcal{N}$ is a
+point-wise static function.
+
+\subsection{Block Identification}
+\label{sec:lnl_id}
+
+Each block is identified independently from dedicated measurements.
+
+\paragraph{$L_1$: Input Filter.}
+The linear frequency response of the device is measured using a sine sweep
+stimulus.  The transfer function magnitude is estimated bin-wise as:
+
+\begin{equation}
+    \bigl|\hat{H}(f_k)\bigr| \;=\;
+    \frac{\bigl|\mathcal{F}\{r\}[k]\bigr|}{\bigl|\mathcal{F}\{x\}[k]\bigr|}
+    \label{eq:fr_estimate}
+\end{equation}
+
+where $x$ and $r$ are the (aligned) reference and recorded signals.
+The magnitude spectrum is 1/3-octave smoothed and used to design a
+$512$-tap linear-phase FIR filter $h_1$ via an inverse-FFT window method.
+
+\paragraph{$\mathcal{N}$: Static Nonlinearity (Waveshaper).}
+With $L_1$ applied, the pre-filtered signal $v[n] = (h_1 * x)[n]$ is
+compared to the recorded output at each sample amplitude.  The mapping
+$v[n] \mapsto r[n]$ is accumulated into a 1024-entry lookup table
+(waveshaper) uniformly spanning the input range $[-1,\,+1]$:
+
+\begin{equation}
+    \mathcal{N}(a) \;\approx\; \text{LUT}\!\left[
+        \left\lfloor \frac{(a + 1)}{2} \cdot 1023 \right\rceil
+    \right]
+    \label{eq:waveshaper}
+\end{equation}
+
+Measurements at multiple gain levels and stimulus frequencies (100\,Hz and
+1\,kHz sine tones) are pooled to improve coverage of the input amplitude range.
+
+\paragraph{$L_2$: Output Filter.}
+In the current implementation $L_2$ is the identity ($h_2 = \delta$).
+A non-trivial output filter may be fitted in future work to capture
+output-side coloration that is not attributable to the input chain or
+the nonlinearity.
+
+\subsection{Total Harmonic Distortion}
+\label{sec:thd}
+
+As a diagnostic, Total Harmonic Distortion (THD) is computed for each
+sine-tone capture:
+
+\begin{equation}
+    \text{THD} \;=\;
+    \frac{\sqrt{\displaystyle\sum_{k=2}^{K} A_k^2}}{A_1} \times 100\%
+    \label{eq:thd}
+\end{equation}
+
+where $A_1$ is the fundamental amplitude and $A_k$ is the amplitude of the
+$k$-th harmonic, all estimated from the magnitude spectrum of the recorded signal.
+THD is reported per gain label to characterize the onset and degree of saturation.
+
+% ------------------------------------------------------------
+\section{Measurement Procedure}
+\label{sec:procedure}
+% TODO: Step-by-step instructions a reader would follow to
+% characterize a new device. Reference the UI workflow.
+
+% ------------------------------------------------------------
+\section{Plugin Implementation}
+\label{sec:plugin}
+% TODO: Describe how the fitted LNLModel is exported to a JUCE
+% AudioProcessor. Discuss real-time convolution strategy for L1
+% (overlap-add/save) and LUT interpolation for N.
+
+% ------------------------------------------------------------
+\section{Results}
+\label{sec:results}
+% TODO: Apply to a specific hardware device.
+% Include FR plot, THD vs. gain table, waveshaper curve,
+% and A/B perceptual evaluation.
+
+\subsection{Frequency Response}
+% TODO: Figure — measured vs. modeled FR.
+
+\subsection{Nonlinearity Characterization}
+% TODO: Figure — waveshaper curve + THD table.
+
+\subsection{Perceptual Evaluation}
+% TODO: Informal listening test methodology and findings.
+
+% ------------------------------------------------------------
+\section{Discussion}
+\label{sec:discussion}
+% TODO: Model limitations (memory effects, dynamic nonlinearities,
+% compressor behavior not yet captured). Future work.
+
+% ------------------------------------------------------------
+\section{Conclusion}
+\label{sec:conclusion}
+% TODO: Summarize contributions and outcomes.
+
+% ------------------------------------------------------------
+\bibliographystyle{plain}
+\bibliography{refs}
+% TODO: populate refs.bib with relevant citations.
+
+\end{document}
