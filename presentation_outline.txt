@@ -1,0 +1,253 @@
+====================================================================
+  ANALOG COLOR MEASUREMENT — 6-MINUTE PRESENTATION OUTLINE
+====================================================================
+Approximate timing noted per slide. Total: ~6 minutes.
+====================================================================
+
+
+--------------------------------------------------------------------
+SLIDE 1 — TITLE SLIDE
+--------------------------------------------------------------------
+Title:   Analog Color Measurement
+Subtitle: Capturing the Sound of Hardware and Deploying It as a Plugin
+Your name / course / date
+
+
+--------------------------------------------------------------------
+SLIDE 2 — THE PROBLEM: WHY DOES HARDWARE SOUND BETTER?
+--------------------------------------------------------------------
+[~60 seconds]
+
+Talk track:
+  "When engineers like Bob Clearmountain (Bruce Springsteen, The Rolling Stones),
+   Chris Lord-Alge (Green Day, Foo Fighters), or Tchad Blake (The Black Keys, Tom Waits)
+   are asked why their records sound a certain way, the answer almost always comes
+   back to the same thing — the hardware they run audio through.
+
+   Tape machines, vintage console channels, transformer-coupled preamps, tube compressors.
+   These devices don't just pass audio cleanly. They shape it. They add what engineers call
+   'color' — a harmonic warmth, a frequency tilt, a gentle squeezing of transients
+   that makes music feel more alive than a purely digital chain.
+
+   The problem? That hardware costs tens of thousands of dollars, requires physical studio space,
+   and can't travel with you to a laptop session.
+
+   This project asks: can we *measure* exactly what a piece of hardware does to a signal,
+   model it mathematically, and deploy that model as a real-time plugin?"
+
+Bullet points on slide:
+  • Top engineers regularly run tracks through hardware for "color"
+  • The effect is real and measurable: harmonic distortion, frequency shaping, compression
+  • Goal: Capture it. Model it. Bring it anywhere.
+
+
+--------------------------------------------------------------------
+SLIDE 3 — WHAT IS "COLOR," TECHNICALLY?
+--------------------------------------------------------------------
+[~45 seconds]
+
+Talk track:
+  "Analog color comes from three overlapping physical phenomena:
+
+   First, frequency coloration — transformers and filters emphasize or cut certain
+   frequencies in ways that aren't flat.
+
+   Second, harmonic saturation — when you push level into a tube or tape, the output
+   is no longer a clean copy of the input. It's slightly bent. That bending
+   creates harmonic overtones — typically 2nd and 3rd harmonics — that our ears
+   interpret as warmth or presence.
+
+   Third, dynamic behavior — the way a device responds differently at different levels.
+   Push harder, and the transfer curve changes. A compressor adds gain reduction.
+   A tape saturates more aggressively.
+
+   Together, these three properties form the 'signature' of a device. Our job is to
+   measure and model all three."
+
+Bullet points on slide:
+  • Frequency coloration (linear filtering)
+  • Harmonic saturation (nonlinear transfer curve)
+  • Level-dependent behavior (dynamic response)
+
+
+--------------------------------------------------------------------
+SLIDE 4 — THE ALGORITHMS: MATHEMATICAL TOOLS
+--------------------------------------------------------------------
+[~90 seconds]
+
+Talk track:
+  "To model these properties, the system uses four core algorithms."
+
+--- Algorithm 1: Wiener FIR (Frequency Response Estimation) ---
+  Purpose: Captures the linear frequency coloring of the device.
+
+  Equation:
+    H[k] = Σ (conj(X[k]) · Y[k])  /  (Σ |X[k]|² + λ)
+
+    X[k] = reference signal spectrum
+    Y[k] = recorded signal spectrum
+    λ    = regularization constant (~-60 dB relative)
+
+  Plain English: "We play a known sweep signal through the hardware and record
+  what comes back. This equation computes the best-fit linear filter that explains
+  the difference — the EQ curve of the device."
+
+--- Algorithm 2: Waveshaper Table ---
+  Purpose: Captures the nonlinear transfer curve (saturation/clipping behavior).
+
+  Equation:
+    y = f(x)   where f is a 1024-point lookup table,
+                built by averaging: output_value vs. input_amplitude
+                across multiple sine-tone measurements
+
+  Plain English: "We play sine tones at multiple levels and map each input amplitude
+  to the output amplitude the hardware produces. This creates a curve — the device's
+  'transfer function' — which we store in a table for real-time playback."
+
+--- Algorithm 3: THD Measurement ---
+  Purpose: Quantifies harmonic distortion to characterize saturation character.
+
+  Equation:
+    THD% = 100 × √( Σ|Hₙ|² / |H₁|² )   for harmonics n = 2 through 9
+
+  Plain English: "After each sine tone capture, we measure how much energy appeared
+  at harmonic frequencies that weren't in the original signal. This tells us
+  how 'saturated' a device is at a given level."
+
+--- Algorithm 4: Latency Alignment (Cross-Correlation) ---
+  Purpose: Aligns reference and recorded signals in time before analysis.
+
+  Equation:
+    delay = argmax_τ { Σ x[n] · y[n + τ] }
+    Sub-sample correction via 4-point Lagrange interpolation
+
+  Plain English: "Any audio interface introduces some delay between what we send
+  and what we receive. This algorithm finds that delay to sample accuracy and corrects
+  for it, so our mathematical comparison is perfectly time-aligned."
+
+
+--------------------------------------------------------------------
+SLIDE 5 — THE SYSTEM: TWO PARTS
+--------------------------------------------------------------------
+[~15 seconds — transition slide]
+
+  "The system is split into two parts:
+   a profiler application that measures hardware,
+   and a plugin that plays back the model in real time."
+
+  [Simple diagram: Hardware → Profiler App → Model File → Plugin → DAW]
+
+
+--------------------------------------------------------------------
+SLIDE 6 — THE PROFILER APP (Hardware Profiler)
+--------------------------------------------------------------------
+[~60 seconds]
+
+Talk track:
+  "The profiler is a standalone app you use in your studio.
+
+   You connect your hardware device — a preamp, a compressor, a tape machine —
+   to your audio interface using a send/return loop. The profiler routes audio
+   out through the hardware and records what comes back.
+
+   You tell the app how many measurements you want — a Quick pass takes 30 seconds
+   and plays a frequency sweep plus a 1kHz sine tone. A HiFi pass takes 3 minutes
+   and adds pink noise, a low-frequency tone, and a drum loop.
+
+   It automatically corrects for any latency introduced by your interface,
+   saves the raw recordings, and then runs all four algorithms to fit the model.
+   The result is a single model file that captures that device's unique sound."
+
+Bullet points on slide:
+  • Connects to hardware via send/return loop on any audio interface
+  • Plays calibrated test signals: sine sweeps, pink noise, drum loops
+  • Automatically detects and corrects round-trip latency
+  • Exports a model file: frequency response + transfer curve + distortion profile
+  • Quick mode: 30 sec | Standard: 2 min | HiFi: 3 min
+
+
+--------------------------------------------------------------------
+SLIDE 7 — THE PLUGIN (Hardware Color)
+--------------------------------------------------------------------
+[~45 seconds]
+
+Talk track:
+  "Once you have a model file, you load it into the plugin — a standard VST3/AU
+   that works in any DAW.
+
+   The plugin processes audio in real time through the model in three stages,
+   matching the L-N-L architecture: first the linear EQ coloring of the device,
+   then the nonlinear saturation, then any post-saturation shaping.
+
+   Three controls give you artistic flexibility:
+   Drive scales the input level, controlling how hard the saturation hits —
+   just like pushing level into real hardware.
+   Weight tilts the tonal balance, warmer or brighter, without breaking the model.
+   Mix blends the processed signal with the dry signal for parallel processing.
+
+   The plugin's latency is reported to the DAW so it's automatically compensated."
+
+Bullet points on slide:
+  • Loads any model file captured with the profiler
+  • L-N-L architecture: linear filter → waveshaper → output filter
+  • Drive: controls saturation intensity (like pushing hardware harder)
+  • Weight: tonal tilt — warmer or brighter
+  • Mix: dry/wet blend for parallel saturation
+  • Works in any DAW as VST3 or AU
+
+
+--------------------------------------------------------------------
+SLIDE 8 — DEMO
+--------------------------------------------------------------------
+[~45 seconds]
+
+Talk track:
+  "Here's a quick demo.
+
+   [Play dry audio clip]
+   This is the dry signal — no processing.
+
+   [Play processed clip through plugin]
+   And this is the same audio through the plugin with a model loaded.
+   You can hear the [describe what you hear: frequency tilt / warmth / subtle saturation].
+
+   [Adjust Drive knob]
+   Pushing the Drive harder increases the saturation — more harmonic content,
+   more of that compressed, forward sound.
+
+   [Toggle bypass]
+   Bypassed... and back in."
+
+Notes:
+  - Prepare a short 10–15 second clip (dry vocal, bass DI, or full mix bus)
+  - Record both dry and wet versions ahead of time as a fallback
+  - If live demo, have bypass button mapped and visible on screen
+
+
+--------------------------------------------------------------------
+SLIDE 9 — SUMMARY & TAKEAWAYS
+--------------------------------------------------------------------
+[~15 seconds]
+
+  • Analog hardware sound is measurable and reproducible
+  • Four algorithms — Wiener FIR, waveshaper fitting, THD measurement, latency alignment
+  • Profiler captures hardware; plugin deploys it anywhere
+  • Result: the sound engineers have used for decades, in a plugin
+
+  "Any questions?"
+
+
+====================================================================
+  TIMING SUMMARY
+====================================================================
+  Slide 2 — Why hardware sounds better      ~60 sec
+  Slide 3 — What is color, technically      ~45 sec
+  Slide 4 — The algorithms                  ~90 sec
+  Slide 5 — System overview (transition)    ~15 sec
+  Slide 6 — The profiler app                ~60 sec
+  Slide 7 — The plugin                      ~45 sec
+  Slide 8 — Demo                            ~45 sec
+  Slide 9 — Summary                         ~15 sec
+  ------------------------------------------------
+  Total                                     ~6:00 min
+====================================================================
