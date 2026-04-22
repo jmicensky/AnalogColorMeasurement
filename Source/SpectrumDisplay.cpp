@@ -1,12 +1,21 @@
-// Renders a logarithmic frequency-response curve (20 Hz–20 kHz, ±8 dB) with dB grid lines and frequency axis labels.
-// Used in both the profiler app and plugin editor to visualize the hardware's measured tonal character.
+// Renders a logarithmic frequency-response curve (20 Hz–20 kHz, ±8 dB) with a phosphor-green
+// CRT aesthetic: raster grid, rounded display bezel, and multi-layer glow on the curve.
 
 #include "SpectrumDisplay.h"
 
+namespace
+{
+    constexpr uint32_t kGreenPrimary = 0xff33ff33;
+    constexpr uint32_t kGreenDim     = 0x6633ff33;
+    constexpr uint32_t kGreenGrid    = 0x0f33ff33;  // ~6% — raster squares
+    constexpr uint32_t kGreenLine    = 0x1a33ff33;  // ~10% — dB/freq grid
+    constexpr uint32_t kGreenZero    = 0x3f33ff33;  // 0 dB line, slightly brighter
+    constexpr uint32_t kBgBase       = 0xff0d0d0d;
+    constexpr uint32_t kBgPlot       = 0xff080808;
+}
+
 SpectrumDisplay::SpectrumDisplay()
 {
-    // Mark opaque so plugin hosts don't try to composite the parent background
-    // behind this component — it paints every pixel itself via fillAll.
     setOpaque (true);
 }
 
@@ -33,14 +42,13 @@ float SpectrumDisplay::freqToNorm (float hz) noexcept
 
 float SpectrumDisplay::dbToNorm (float db) noexcept
 {
-    // 0 = top (max dB), 1 = bottom (min dB)
     return (kMaxDb - db) / (kMaxDb - kMinDb);
 }
 
 //==============================================================================
 void SpectrumDisplay::paint (juce::Graphics& g)
 {
-    const auto bounds = getLocalBounds().toFloat();
+    const auto  bounds = getLocalBounds().toFloat();
     const float left   = 42.0f;
     const float right  = bounds.getWidth() - 8.0f;
     const float top    = 8.0f;
@@ -48,44 +56,50 @@ void SpectrumDisplay::paint (juce::Graphics& g)
     const float plotW  = right - left;
     const float plotH  = bottom - top;
 
-    // --- Component background + outer border so it stands out ---
-    g.fillAll (juce::Colour (0xff1a1a2a));
-    g.setColour (juce::Colour (0xff5050a0));
-    g.drawRect (getLocalBounds(), 1);
+    // --- Component background ---
+    g.fillAll (juce::Colour (kBgBase));
 
-    // --- Plot area background ---
-    g.setColour (juce::Colour (0xff0f0f1c));
+    // --- CRT bezel: recessed display with 20px corner radius ---
+    const juce::Rectangle<float> bezel (left - 6.0f, top - 6.0f,
+                                        plotW + 12.0f, plotH + 12.0f);
+    g.setColour (juce::Colour (kBgPlot));
+    g.fillRoundedRectangle (bezel, 20.0f);
+
+    // Outer glow ring
+    g.setColour (juce::Colour (0x2033ff33));
+    g.drawRoundedRectangle (bezel.reduced (0.5f), 20.0f, 1.5f);
+
+    // Inner plot fill
+    g.setColour (juce::Colour (kBgPlot));
     g.fillRect (left, top, plotW, plotH);
 
-    // --- dB grid lines ---
+    // --- Raster grid (40 px squares) ---
+    g.setColour (juce::Colour (kGreenGrid));
+    for (float x = left; x <= right; x += 40.0f)
+        g.drawVerticalLine (juce::roundToInt (x), top, bottom);
+    for (float y = top; y <= bottom; y += 40.0f)
+        g.drawHorizontalLine (juce::roundToInt (y), left, right);
+
+    // --- dB grid lines + Y-axis labels ---
     const float dbGrid[] = { -8.0f, -6.0f, -4.0f, -2.0f, 0.0f, 2.0f, 4.0f, 6.0f };
-    g.setFont (juce::Font (juce::FontOptions().withHeight (10.0f)));
+    g.setFont (juce::Font (juce::FontOptions().withName ("Courier New").withHeight (10.0f)));
 
     for (float db : dbGrid)
     {
         const float y = top + dbToNorm (db) * plotH;
 
-        if (db == 0.0f)
-        {
-            g.setColour (juce::Colour (0xff505070));
-            g.drawHorizontalLine (juce::roundToInt (y), left, right);
-        }
-        else
-        {
-            g.setColour (juce::Colour (0xff303048));
-            g.drawHorizontalLine (juce::roundToInt (y), left, right);
-        }
+        g.setColour (juce::Colour (db == 0.0f ? kGreenZero : kGreenLine));
+        g.drawHorizontalLine (juce::roundToInt (y), left, right);
 
-        // Y-axis label
-        g.setColour (juce::Colour (0xff8080a0));
+        g.setColour (juce::Colour (kGreenDim));
         const juce::String label = (db > 0 ? "+" : "") + juce::String ((int) db);
         g.drawText (label, 0, juce::roundToInt (y) - 6, (int) left - 2, 13,
                     juce::Justification::centredRight);
     }
 
-    // --- Frequency grid lines ---
-    const float freqGrid[] = { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f,
-                                1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f };
+    // --- Frequency grid lines + X-axis labels ---
+    const float freqGrid[]       = { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f,
+                                     1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f };
     const juce::String freqLabels[] = { "20", "50", "100", "200", "500",
                                         "1k", "2k", "5k", "10k", "20k" };
 
@@ -93,47 +107,44 @@ void SpectrumDisplay::paint (juce::Graphics& g)
     {
         const float x = left + freqToNorm (freqGrid[i]) * plotW;
 
-        g.setColour (juce::Colour (0xff303048));
+        g.setColour (juce::Colour (kGreenLine));
         g.drawVerticalLine (juce::roundToInt (x), top, bottom);
 
-        g.setColour (juce::Colour (0xff8080a0));
+        g.setColour (juce::Colour (kGreenDim));
         g.drawText (freqLabels[i],
                     juce::roundToInt (x) - 16, (int) bottom + 2, 32, 16,
                     juce::Justification::centred);
     }
 
     // --- Plot border ---
-    g.setColour (juce::Colour (0xff404060));
+    g.setColour (juce::Colour (0x3033ff33));
     g.drawRect (left, top, plotW, plotH, 1.0f);
 
-    // --- FR curve ---
+    // --- No-data state ---
     if (freqs.size() < 2)
     {
         if (showSetupHints)
         {
-            // Semi-transparent instructional overlay for first-time setup.
             const float boxW   = std::min (plotW - 40.0f, 520.0f);
             const float innerW = boxW - 36.0f;
             const float padX   = left + (plotW - boxW) * 0.5f + 18.0f;
 
-            // Measure each hint at 12.5 pt with word-wrap to compute exact height needed.
             const juce::String hints[] = {
-                u8"\u2022  Set input gain with the hardware at its loudest/most-driven setting \u2014 the plan starts there intentionally.",
-                u8"\u2022  Use a reamp box between your line output and the hardware input for correct impedance and level.",
-                u8"\u2022  Do NOT adjust the interface input gain between capture steps \u2014 all levels must stay fixed.",
-                u8"\u2022  Send and Return must be on the same physical interface so latency alignment works correctly."
+                u8"•  Set input gain with the hardware at its loudest/most-driven setting — the plan starts there intentionally.",
+                u8"•  Use a reamp box between your line output and the hardware input for correct impedance and level.",
+                u8"•  Do NOT adjust the interface input gain between capture steps — all levels must stay fixed.",
+                u8"•  Send and Return must be on the same physical interface so latency alignment works correctly."
             };
 
             const float hintFontH = 12.5f;
-            const float lineH     = hintFontH + 3.0f;   // px per text line
-            const float hintGap   = 8.0f;               // vertical gap between hints
+            const float lineH     = hintFontH + 3.0f;
+            const float hintGap   = 8.0f;
             const float titleH    = 18.0f;
             const float titleGap  = 12.0f;
             const float padTop    = 14.0f;
             const float padBot    = 14.0f;
 
-            // Compute total height by counting wrapped lines per hint.
-            juce::Font hintFont (juce::FontOptions().withHeight (hintFontH));
+            juce::Font hintFont (juce::FontOptions().withName ("Courier New").withHeight (hintFontH));
             float contentH = padTop + titleH + titleGap;
             for (int i = 0; i < 4; ++i)
             {
@@ -144,32 +155,34 @@ void SpectrumDisplay::paint (juce::Graphics& g)
                 tl.createLayout (as, innerW);
                 contentH += tl.getNumLines() * lineH + hintGap;
             }
-            contentH += padBot - hintGap;  // replace last gap with bottom pad
+            contentH += padBot - hintGap;
 
             const float boxH = contentH;
             const float boxX = left + (plotW - boxW) * 0.5f;
             const float boxY = top  + (plotH - boxH) * 0.5f;
 
-            g.setColour (juce::Colour (0xcc333340));   // ~80% opaque dark grey
+            g.setColour (juce::Colour (0xcc0d1a0d));
             g.fillRoundedRectangle (boxX, boxY, boxW, boxH, 8.0f);
-            g.setColour (juce::Colour (0x66aaaacc));
+            g.setColour (juce::Colour (kGreenDim));
             g.drawRoundedRectangle (boxX, boxY, boxW, boxH, 8.0f, 1.0f);
 
             float ty = boxY + padTop;
 
-            g.setColour (juce::Colours::white.withAlpha (0.85f));
-            g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f).withStyle ("Bold")));
-            g.drawText ("Interface Setup — Before You Measure", (int) padX, (int) ty,
-                        (int) innerW, (int) titleH, juce::Justification::centredLeft);
+            g.setColour (juce::Colour (kGreenPrimary));
+            g.setFont (juce::Font (juce::FontOptions().withName ("Courier New")
+                                                      .withHeight (13.0f)
+                                                      .withStyle ("Bold")));
+            g.drawText ("Interface Setup \xe2\x80\x94 Before You Measure",
+                        (int) padX, (int) ty, (int) innerW, (int) titleH,
+                        juce::Justification::centredLeft);
             ty += titleH + titleGap;
 
             g.setFont (hintFont);
-            g.setColour (juce::Colours::lightgrey.withAlpha (0.9f));
 
             for (const auto& hint : hints)
             {
                 juce::AttributedString as;
-                as.append (hint, hintFont, juce::Colours::lightgrey.withAlpha (0.9f));
+                as.append (hint, hintFont, juce::Colour (kGreenDim));
                 as.setWordWrap (juce::AttributedString::byWord);
                 juce::TextLayout tl;
                 tl.createLayout (as, innerW);
@@ -180,16 +193,22 @@ void SpectrumDisplay::paint (juce::Graphics& g)
         }
         else
         {
-            g.setColour (juce::Colours::white.withAlpha (0.5f));
-            g.setFont (juce::Font (juce::FontOptions().withHeight (14.0f)));
-            g.drawText ("No model loaded — load a .json artifact file",
+            g.setColour (juce::Colour (kGreenDim));
+            g.setFont (juce::Font (juce::FontOptions().withName ("Courier New").withHeight (14.0f)));
+            g.drawText ("No model loaded \xe2\x80\x94 load a .json artifact file",
                         juce::roundToInt (left), juce::roundToInt (top),
                         juce::roundToInt (plotW), juce::roundToInt (plotH),
                         juce::Justification::centred);
         }
+
+        // Scanlines over plot area even with no data
+        g.setColour (juce::Colour (0x09000000));
+        for (float y = top; y < bottom; y += 2.0f)
+            g.drawHorizontalLine (juce::roundToInt (y), left, right);
         return;
     }
 
+    // --- Build curve path ---
     juce::Path curve;
     bool started = false;
 
@@ -207,19 +226,30 @@ void SpectrumDisplay::paint (juce::Graphics& g)
         else           { curve.lineTo (x, y); }
     }
 
-    // Filled area under curve (subtle)
     if (started)
     {
+        // Filled area under curve
         juce::Path fill = curve;
         fill.lineTo (right, bottom);
         fill.lineTo (left,  bottom);
         fill.closeSubPath();
-
-        g.setColour (juce::Colour (0x2200d4aa));
+        g.setColour (juce::Colour (0x1233ff33));
         g.fillPath (fill);
+
+        // Glow layers (wide → narrow, dim → bright)
+        g.setColour (juce::Colour (0x1a33ff33));
+        g.strokePath (curve, juce::PathStrokeType (5.0f));
+
+        g.setColour (juce::Colour (0x4033ff33));
+        g.strokePath (curve, juce::PathStrokeType (2.5f));
+
+        // Main curve
+        g.setColour (juce::Colour (kGreenPrimary));
+        g.strokePath (curve, juce::PathStrokeType (1.5f));
     }
 
-    // Main curve line
-    g.setColour (juce::Colour (0xff00d4aa));
-    g.strokePath (curve, juce::PathStrokeType (1.5f));
+    // --- Scanlines clipped to plot area ---
+    g.setColour (juce::Colour (0x09000000));
+    for (float y = top; y < bottom; y += 2.0f)
+        g.drawHorizontalLine (juce::roundToInt (y), left, right);
 }

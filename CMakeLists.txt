@@ -22,6 +22,7 @@ juce_add_binary_data(HardwareProfilerData SOURCES
 target_sources(HardwareProfiler PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
+    Source/CRTLookAndFeel.cpp
     Source/AudioEngine.cpp
     Source/LatencyAligner.cpp
     Source/StimulusPlan.cpp

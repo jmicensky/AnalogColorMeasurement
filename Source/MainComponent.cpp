@@ -181,11 +181,13 @@ MainComponent::MainComponent()
     appleExtras.addItem (1, "Audio Device Settings...");
     juce::MenuBarModel::setMacMainMenu (this, &appleExtras);
 
+    setLookAndFeel (&crtLookAndFeel);
     setSize (1200, 720);
 }
 
 MainComponent::~MainComponent()
 {
+    setLookAndFeel (nullptr);
     juce::MenuBarModel::setMacMainMenu (nullptr);
 }
 
@@ -890,16 +892,28 @@ void MainComponent::checkRoutingSafety (FixedComboBox* changed)
 //==============================================================================
 void MainComponent::paint (juce::Graphics& g)
 {
-    g.fillAll (getLookAndFeel().findColour (juce::ResizableWindow::backgroundColourId));
+    // Base fill
+    g.fillAll (juce::Colour (CRTLookAndFeel::kColBgBase));
 
+    // Sidebar strip (left control panel)
+    g.setColour (juce::Colour (CRTLookAndFeel::kColBgSidebar));
+    g.fillRect (0, 0, sidebarWidth, getHeight());
+
+    // Status-bar separator (full width)
+    g.setColour (juce::Colour (CRTLookAndFeel::kColGreenDim));
+    g.drawHorizontalLine (getHeight() - juce::roundToInt (30 * uiScale), 0.0f, (float) getWidth());
+
+    // Section separators (sidebar width only)
     const float x0 = 10.0f;
-    const float x1 = (float) getWidth() - 10.0f;
+    const float x1 = (float) sidebarWidth - 10.0f;
+    if (sepY1 > 0) g.drawHorizontalLine (sepY1, x0, x1);
+    if (sepY2 > 0) g.drawHorizontalLine (sepY2, x0, x1);
+    if (sepY3 > 0) g.drawHorizontalLine (sepY3, x0, x1);
 
-    g.setColour (juce::Colours::grey);
-    if (sepY1 > 0) g.drawHorizontalLine (sepY1,              x0, x1);
-    if (sepY2 > 0) g.drawHorizontalLine (sepY2,              x0, x1);
-    if (sepY3 > 0) g.drawHorizontalLine (sepY3,              x0, x1);
-    g.drawHorizontalLine (getHeight() - juce::roundToInt (30 * uiScale), x0, x1);
+    // Scanlines over entire window
+    g.setColour (juce::Colour (0x09000000));
+    for (int y = 0; y < getHeight(); y += 2)
+        g.drawHorizontalLine (y, 0.0f, (float) getWidth());
 }
 
 void MainComponent::resized()
@@ -908,7 +922,7 @@ void MainComponent::resized()
     auto s = [this] (int x) { return juce::roundToInt (x * uiScale); };
 
     // Update fonts to match current scale everywhere.
-    const auto f14 = juce::Font (juce::FontOptions().withHeight (14.0f * uiScale));
+    const auto f14 = CRTLookAndFeel::monoFont (14.0f * uiScale);
     projectLabel .setFont (f14);
     modeLabel    .setFont (f14);
     qualityLabel .setFont (f14);
@@ -975,6 +989,7 @@ void MainComponent::resized()
 
     // Left column: controls fit in ~460 px; right side holds meter + spectrum.
     const int splitX  = s (470);
+    sidebarWidth = splitX;
     const int meterW  = s (42);
     const int meterX  = splitX + margin;
     const int rightX  = meterX + meterW + margin;
@@ -1010,5 +1025,5 @@ void MainComponent::resized()
     // --- Status bar (leave room for scale buttons on the right) ---
     const int statusW = bx - margin - s (8);
     statusLabel.setBounds (margin, statusY, statusW, s (24));
-    statusLabel.setFont (juce::Font (juce::FontOptions().withHeight (12.0f * uiScale)));
+    statusLabel.setFont (CRTLookAndFeel::monoFont (12.0f * uiScale));
 }

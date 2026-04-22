@@ -1,5 +1,6 @@
 #pragma once
 #include <JuceHeader.h>
+#include "CRTLookAndFeel.h"
 #include "AudioEngine.h"
 #include "LatencyAligner.h"
 #include "SessionWriter.h"
@@ -19,6 +20,10 @@ public:
     void resized() override;
 
 private:
+    // Declared first so it outlives all child component members.
+    CRTLookAndFeel crtLookAndFeel;
+    int            sidebarWidth { 470 };  // updated in resized(), read in paint()
+
     // --- Plan list model ---
     struct PlanListModel : public juce::ListBoxModel
     {
@@ -40,18 +45,26 @@ private:
             const bool isCurrent = (row == plan->currentStepIndex()) && ! plan->isComplete();
 
             if (isCurrent)
-                g.fillAll (juce::Colour (0xff2a5a8a));
+                g.fillAll (juce::Colour (0xff0d2a0d));
             else if (step.completed)
-                g.fillAll (juce::Colour (0xff2a4a2a));
+                g.fillAll (juce::Colour (0xff0a1a0a));
             else
-                g.fillAll (juce::Colour (0xff222232));
+                g.fillAll (juce::Colour (CRTLookAndFeel::kColBgBase));
 
-            g.setColour (juce::Colours::white);
-            g.setFont (juce::Font (juce::FontOptions().withHeight (13.0f * scale)));
+            if (isCurrent)
+                g.setColour (juce::Colour (CRTLookAndFeel::kColGreenPrimary));
+            else if (step.completed)
+                g.setColour (juce::Colour (CRTLookAndFeel::kColGreenDim));
+            else
+                g.setColour (juce::Colour (0x4433ff33));
+
+            g.setFont (juce::Font (juce::FontOptions()
+                           .withName ("Courier New")
+                           .withHeight (13.0f * scale)));
 
             const int indent = juce::roundToInt (8 * scale);
             const juce::String text = juce::String (row + 1) + ".  "
-                                    + step.gainLabel + "  —  "
+                                    + step.gainLabel + "  \xe2\x80\x94  "
                                     + step.stimulusName
                                     + (step.completed ? "  [done]" : "");
             g.drawText (text, indent, 0, width - indent, height, juce::Justification::centredLeft);
